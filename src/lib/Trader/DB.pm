@@ -142,9 +142,21 @@ sub fetch_market_indices {
     $ua->connect_timeout(2);
 
     my @indices = (
-        { name => 'DOW',    symbol => '^DJI' },
-        { name => 'S&P 500',symbol => '^GSPC' },
-        { name => 'NASDAQ', symbol => '^IXIC' },
+        {
+            name   => 'DOW',
+            symbol => '^DJI',
+            url    => 'https://www.marketwatch.com/investing/index/djia?mod=home_markets'
+        },
+        {
+            name   => 'S&P 500',
+            symbol => '^GSPC',
+            url    => 'https://www.marketwatch.com/investing/index/spx?mod=home_markets'
+        },
+        {
+            name   => 'NASDAQ',
+            symbol => '^IXIC',
+            url    => 'https://www.marketwatch.com/investing/index/comp?mod=home_markets'
+        },
     );
 
     my @results;
@@ -154,7 +166,8 @@ sub fetch_market_indices {
         my $change = 0.0;
         my $pct = 0.0;
         eval {
-            my $tx = $ua->get("https://query1.finance.yahoo.com/v8/finance/chart/$sym?interval=1d&range=2d");
+            # Use interval=1m&range=1d to capture real-time intraday price and true previousClose
+            my $tx = $ua->get("https://query1.finance.yahoo.com/v8/finance/chart/$sym?interval=1m&range=1d");
             if ($tx->result->is_success) {
                 my $meta = $tx->result->json->{chart}{result}[0]{meta};
                 $price = $meta->{regularMarketPrice} // 0.0;
@@ -166,6 +179,7 @@ sub fetch_market_indices {
         push @results, {
             name   => $item->{name},
             symbol => $item->{symbol},
+            url    => $item->{url},
             price  => $price,
             change => $change,
             pct    => $pct,

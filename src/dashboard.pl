@@ -45,10 +45,41 @@ helper cached_indices => sub ($c) {
         $INDICES_CACHE_TIME = $now;
     }
     return $INDICES_CACHE // [
-        { name => 'DOW', symbol => '^DJI', price => 0.0, change => 0.0, pct => 0.0 },
-        { name => 'S&P 500', symbol => '^GSPC', price => 0.0, change => 0.0, pct => 0.0 },
-        { name => 'NASDAQ', symbol => '^IXIC', price => 0.0, change => 0.0, pct => 0.0 },
+        {
+            name   => 'DOW',
+            symbol => '^DJI',
+            url    => 'https://www.marketwatch.com/investing/index/djia?mod=home_markets',
+            price  => 0.0,
+            change => 0.0,
+            pct    => 0.0
+        },
+        {
+            name   => 'S&P 500',
+            symbol => '^GSPC',
+            url    => 'https://www.marketwatch.com/investing/index/spx?mod=home_markets',
+            price  => 0.0,
+            change => 0.0,
+            pct    => 0.0
+        },
+        {
+            name   => 'NASDAQ',
+            symbol => '^IXIC',
+            url    => 'https://www.marketwatch.com/investing/index/comp?mod=home_markets',
+            price  => 0.0,
+            change => 0.0,
+            pct    => 0.0
+        },
     ];
+};
+
+get '/favicon.svg' => sub ($c) {
+    $c->res->headers->content_type('image/svg+xml');
+    $c->reply->file("$RealBin/../public/favicon.svg");
+};
+
+get '/favicon.ico' => sub ($c) {
+    $c->res->headers->content_type('image/svg+xml');
+    $c->reply->file("$RealBin/../public/favicon.svg");
 };
 
 get '/' => sub ($c) {
@@ -118,7 +149,6 @@ post '/api/evaluate' => sub ($c) {
     my $exit_code = $? >> 8;
 
     if ($exit_code == 0) {
-        # Flush price cache so dashboard sees newest numbers immediately
         %PRICE_CACHE = ();
         $INDICES_CACHE = undef;
         $c->render(json => {
@@ -146,6 +176,8 @@ __DATA__
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Trader</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="alternate icon" href="favicon.ico">
   <style>
     /* Theme color definitions with charcoal & black accents */
     :root[data-theme="dark"] {
@@ -189,7 +221,7 @@ __DATA__
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
     body { background-color: var(--bg); color: var(--text); padding: 24px; line-height: 1.5; transition: background-color 0.2s ease, color 0.2s ease; }
 
-    /* Top Market Indices Bar */
+    /* Top Market Indices Bar with MarketWatch Links */
     .indices-strip {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -205,9 +237,30 @@ __DATA__
       justify-content: space-between;
       align-items: center;
       box-shadow: var(--shadow);
+      text-decoration: none;
+      color: inherit;
+      transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+      cursor: pointer;
     }
-    .index-info .name { font-size: 0.85rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); }
-    .index-info .symbol { font-size: 0.75rem; color: var(--text-muted); }
+    .index-card:hover {
+      transform: translateY(-2px);
+      border-color: var(--accent-primary);
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+    }
+    .index-info .name {
+      font-size: 0.85rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .index-info .name .link-icon {
+      font-size: 0.75rem;
+      opacity: 0.6;
+    }
+    .index-info .symbol { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
     .index-metrics { text-align: right; }
     .index-price { font-size: 1.2rem; font-weight: 700; font-family: monospace; }
     .index-change { font-size: 0.8rem; font-weight: 600; margin-top: 2px; }
@@ -224,6 +277,7 @@ __DATA__
       gap: 16px;
     }
     .header-title-box { display: flex; align-items: center; gap: 12px; }
+    .header-logo { width: 32px; height: 32px; vertical-align: middle; }
     .header h1 { font-size: 1.75rem; font-weight: 800; letter-spacing: -0.5px; }
     .tag-badge {
       font-size: 0.75rem;
@@ -238,7 +292,7 @@ __DATA__
     }
     .header-actions { display: flex; align-items: center; gap: 12px; }
 
-    /* Buttons */
+    /* Buttons & Theme Dropdown */
     .btn {
       display: inline-flex;
       align-items: center;
@@ -257,12 +311,43 @@ __DATA__
       border-color: var(--accent-charcoal);
     }
     .btn-evaluate:hover { opacity: 0.9; }
-    .btn-theme {
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Theme Dropdown Control (matching ABS/defaria app style) */
+    .theme-control-wrapper {
+      display: inline-flex;
+      align-items: center;
+      position: relative;
+    }
+    .theme-dropdown {
+      background: var(--card-inner);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      outline: none;
+      transition: border-color 0.15s ease, background-color 0.15s ease;
+      appearance: none;
+      -webkit-appearance: none;
+      padding-right: 28px;
+    }
+    .theme-dropdown:hover {
+      border-color: var(--accent-primary);
+    }
+    .theme-dropdown option {
       background: var(--card-bg);
       color: var(--text);
     }
-    .btn-theme:hover { background: var(--accent-hover); }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .theme-arrow {
+      position: absolute;
+      right: 10px;
+      pointer-events: none;
+      font-size: 0.7rem;
+      color: var(--text-muted);
+    }
 
     /* Primary Stats Grid */
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
@@ -327,13 +412,16 @@ __DATA__
 </head>
 <body>
 
-  <!-- Top Market Indices Bar -->
+  <!-- Top Market Indices Bar with MarketWatch Links -->
   <div class="indices-strip">
     % for my $idx (@$indices) {
-      <div class="index-card">
+      <a href="<%= $idx->{url} %>" target="_blank" rel="noopener noreferrer" class="index-card" title="Open <%= $idx->{name} %> on MarketWatch">
         <div class="index-info">
-          <div class="name"><%= $idx->{name} %></div>
-          <div class="symbol"><%= $idx->{symbol} %></div>
+          <div class="name">
+            <%= $idx->{name} %>
+            <span class="link-icon">↗</span>
+          </div>
+          <div class="symbol"><%= $idx->{symbol} %> &bull; MarketWatch</div>
         </div>
         <div class="index-metrics">
           <div class="index-price"><%= sprintf("%.2f", $idx->{price}) %></div>
@@ -341,13 +429,14 @@ __DATA__
             <%= sprintf("%+.2f (%+.2f%%)", $idx->{change}, $idx->{pct}) %>
           </div>
         </div>
-      </div>
+      </a>
     % }
   </div>
 
   <!-- Header with Actions & Themes -->
   <div class="header">
     <div class="header-title-box">
+      <img src="favicon.svg" alt="Logo" class="header-logo">
       <h1>AI Trader</h1>
       <span class="tag-badge">Semi-Aggressive Posture</span>
       <span class="tag-badge">Spec <code><%= substr($git_commit, 0, 7) %></code></span>
@@ -356,9 +445,16 @@ __DATA__
       <button id="btnEvaluate" class="btn btn-evaluate" onclick="evaluateMarket()">
         <span>⚡ Evaluate the Market</span>
       </button>
-      <button id="btnTheme" class="btn btn-theme" onclick="toggleTheme()">
-        <span id="themeIcon">☀️</span> <span id="themeLabel">Light Mode</span>
-      </button>
+
+      <!-- Theme Dropdown: System / Light / Dark -->
+      <div class="theme-control-wrapper">
+        <select id="themeSelect" class="theme-dropdown" title="Select UI Theme" onchange="applyTheme(this.value)">
+          <option value="system">💻 System</option>
+          <option value="light">☀️ Light</option>
+          <option value="dark">🌙 Dark</option>
+        </select>
+        <span class="theme-arrow">▼</span>
+      </div>
     </div>
   </div>
 
@@ -543,32 +639,31 @@ __DATA__
   <div id="toast"></div>
 
   <script>
-    // Theme toggle handling
-    function initTheme() {
-      const savedTheme = localStorage.getItem('ai_trader_theme') || 'dark';
-      document.documentElement.setAttribute('data-theme', savedTheme);
-      updateThemeButton(savedTheme);
-    }
+    // Theme Management (System / Light / Dark)
+    function applyTheme(preference) {
+      const select = document.getElementById('themeSelect');
+      if (select) select.value = preference;
 
-    function toggleTheme() {
-      const current = document.documentElement.getAttribute('data-theme') || 'dark';
-      const next = current === 'dark' ? 'light' : 'dark';
-      document.documentElement.setAttribute('data-theme', next);
-      localStorage.setItem('ai_trader_theme', next);
-      updateThemeButton(next);
-    }
-
-    function updateThemeButton(theme) {
-      const icon = document.getElementById('themeIcon');
-      const label = document.getElementById('themeLabel');
-      if (theme === 'dark') {
-        icon.textContent = '☀️';
-        label.textContent = 'Light Mode';
+      if (preference === 'system') {
+        const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
       } else {
-        icon.textContent = '🌙';
-        label.textContent = 'Dark Mode';
+        document.documentElement.setAttribute('data-theme', preference);
       }
+      localStorage.setItem('ai_trader_theme', preference);
     }
+
+    function initTheme() {
+      const saved = localStorage.getItem('ai_trader_theme') || 'system';
+      applyTheme(saved);
+    }
+
+    // Dynamic listener for OS dark mode changes when set to System
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
+      if ((localStorage.getItem('ai_trader_theme') || 'system') === 'system') {
+        document.documentElement.setAttribute('data-theme', e.matches ? 'dark' : 'light');
+      }
+    });
 
     // Evaluate the Market trigger
     function showToast(msg) {
@@ -585,7 +680,6 @@ __DATA__
       btn.innerHTML = '<span>⏳ Evaluating Market...</span>';
 
       try {
-        // Compute relative or absolute endpoint depending on base path
         const endpoint = window.location.pathname.endsWith('/')
           ? window.location.pathname + 'api/evaluate'
           : window.location.pathname + '/api/evaluate';
