@@ -1,0 +1,264 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use local::lib 'local';
+use FindBin qw($RealBin);
+use lib "$RealBin/lib";
+
+use Getopt::Long qw(:config no_ignore_case);
+use Pod::Usage;
+use POSIX qw(strftime floor);
+use Trader::DB qw(
+    get_dbh get_latest_nav get_positions fetch_market_price
+    record_trade record_nav get_actionable_catalysts upsert_position close_position
+);
+
+eval {
+    require Dotenv;
+    Dotenv->load if -f '.env';
+};
+
+my $dry_run = 0;
+my $help    = 0;
+my $db_path = $ENV{DB_PATH} // "$RealBin/../data/paper_ledger.db";
+my $benchmark = $ENV{BENCHMARK_TICKER} // 'SPY';
+
+GetOptions(
+    'dry-run' => \$dry_run,
+    'db=s'    => \$db_path,
+    'help|h'  => \$help,
+) or pod2usage(2);
+
+pod2usage(1) if $help;
+
+print "[portfolio_engine] Evaluating risk management & portfolio execution constraints...\n";
+
+my $dbh = get_dbh($db_path);
+my $nav_info = get_latest_nav($dbh);
+
+if (!$nav_info) {
+    die "[portfolio_engine] ERROR: No NAV record found in $db_path. Please run init_db.pl first.\n";
+}
+
+my $cash      = $nav_info->{cash};
+my $total_nav = $nav_info->{total_nav};
+my $drawdown  = $nav_info->{drawdown} // 0.0;
+my $today     = strftime("%Y-%m-%d", localtime);
+
+printf "[portfolio_engine] Current NAV: \$%.2f | Cash: \$%.2f (%.1f%%) | Drawdown: %.1f%%\n",
+    $total_nav, $cash, ($cash / $total_nav) * 100, $drawdown * 100;
+
+# Circuit Breaker Check (specs/02-risk-management.md: Max Drawdown >= 12%)
+my $buys_halted = 0;
+if ($drawdown >= 0.12) {
+    warn "[portfolio_engine] ALERT: Circuit breaker active (Drawdown >= 12%). All new BUY orders halted.\n";
+    $buys_halted = 1;
+}
+
+# --- STEP 1: EVALUATE EXITS ON OPEN POSITIONS ---
+my $positions = get_positions($dbh);
+my %existing_tickers = map { $_->{ticker} => $_ } @$positions;
+my %sector_values;
+
+for my $pos (@$positions) {
+    my $current_price = fetch_market_price($pos->{ticker}) // $pos->{cost_basis};
+    my $cost_basis    = $pos->{cost_basis};
+    my $hwm           = $pos->{high_water_mark} // $cost_basis;
+    $hwm = $current_price if $current_price > $hwm;
+
+    my $pct_change = (($current_price - $cost_basis) / $cost_basis) * 100;
+    my $market_val = $pos->{shares} * $current_price;
+    my $sector     = $pos->{sector} // 'General';
+    $sector_values{$sector} += $market_val;
+
+    printf "  - Open: %s | %d shs @ \$%.2f (Cur: \$%.2f, Return: %+.2f%%)\n",
+        $pos->{ticker}, $pos->{shares}, $cost_basis, $current_price, $pct_change;
+
+    my $exit_triggered = 0;
+    my $exit_reason    = '';
+
+    # Hard Stop-Loss check (>= 8% loss)
+    if ($pct_change <= -8.0) {
+        $exit_triggered = 1;
+        $exit_reason = sprintf("Hard stop-loss triggered (%.2f%% <= -8.0%%)", $pct_change);
+    }
+    # Trailing Profit Lock check (Once gain >= 15%, stop trails at 7% below high-water mark)
+    elsif ($hwm >= $cost_basis * 1.15) {
+        my $trail_threshold = $hwm * 0.93;
+        if ($current_price <= $trail_threshold) {
+            $exit_triggered = 1;
+            $exit_reason = sprintf("Trailing profit lock triggered (\$%.2f <= \$%.2f trail threshold)", $current_price, $trail_threshold);
+        }
+    }
+
+    if ($exit_triggered) {
+        printf "    [EXIT ORDER] %s: %s\n", $pos->{ticker}, $exit_reason;
+        if (!$dry_run) {
+            my $proceeds = $pos->{shares} * $current_price;
+            record_trade(
+                $dbh,
+                ticker         => $pos->{ticker},
+                action         => 'SELL',
+                shares         => $pos->{shares},
+                fill_price     => $current_price,
+                total_amount   => $proceeds,
+                catalyst_score => undef,
+                rationale      => $exit_reason
+            );
+            close_position($dbh, $pos->{ticker});
+            $cash += $proceeds;
+            delete $existing_tickers{$pos->{ticker}};
+            $sector_values{$sector} -= $market_val;
+        }
+    } else {
+        # Update high-water mark if advanced
+        if (!$dry_run && $hwm > ($pos->{high_water_mark} // 0)) {
+            upsert_position($dbh, $pos->{ticker}, $pos->{shares}, $pos->{cost_basis}, $hwm, $sector);
+        }
+    }
+}
+
+# --- STEP 2: EVALUATE CATALYST CANDIDATES & ALLOCATE ---
+if (!$buys_halted) {
+    my $actionable = get_actionable_catalysts($dbh, 7);
+    print "[portfolio_engine] Evaluating " . scalar(@$actionable) . " actionable catalyst candidate(s) (Score >= 7)...\n";
+
+    # Sector mapping helper
+    my %sector_map = (
+        'NVDA' => 'Semiconductors',
+        'AVGO' => 'Semiconductors',
+        'MRVL' => 'Semiconductors',
+        'CEG'  => 'Power & Grid Utilities',
+        'VST'  => 'Power & Grid Utilities',
+        'ETN'  => 'Electrical Equipment',
+        'TLT'  => 'Macro / Fixed Income',
+    );
+
+    for my $cat (@$actionable) {
+        my $ticker = $cat->{ticker};
+        next unless $ticker;
+
+        # Skip if position already held
+        if ($existing_tickers{$ticker}) {
+            printf "  - [%s] Position already open (%d shares). Skipping duplicate entry.\n",
+                $ticker, $existing_tickers{$ticker}{shares};
+            next;
+        }
+
+        my $score  = $cat->{score};
+        my $sector = $sector_map{$ticker} // 'General Equities';
+
+        # Verify universe eligibility: Price >= $5.00
+        my $price = fetch_market_price($ticker);
+        if (!defined $price || $price < 5.00) {
+            warn "  - [$ticker] Excluded: Share price undefined or < \$5.00 (Penny stock rule).\n";
+            next;
+        }
+
+        # Sizing limits (specs/02-risk-management.md)
+        my $max_pos_cap    = $total_nav * 0.20; # 20% max single-position
+        my $min_cash_floor = ($score >= 9) ? ($total_nav * 0.05) : ($total_nav * 0.10); # 10% cash buffer (5% exception for 9+)
+        my $max_sector_cap = $total_nav * 0.40; # 40% sector cap
+
+        my $current_sector_val = $sector_values{$sector} // 0.0;
+        my $avail_sector_room  = $max_sector_cap - $current_sector_val;
+        my $avail_cash         = $cash - $min_cash_floor;
+
+        my $target_alloc = $max_pos_cap;
+        $target_alloc = $avail_cash if $avail_cash < $target_alloc;
+        $target_alloc = $avail_sector_room if $avail_sector_room < $target_alloc;
+
+        if ($target_alloc <= $price) {
+            printf "  - [%s] Insufficient allocation room (\$%.2f) for 1 share @ \$%.2f. Cash: \$%.2f, Cash Floor: \$%.2f\n",
+                $ticker, $target_alloc, $price, $cash, $min_cash_floor;
+            next;
+        }
+
+        my $shares = floor($target_alloc / $price);
+        my $total_cost = $shares * $price;
+
+        printf "  - [BUY ORDER CANDIDATE] %s (%s): %d shares @ \$%.2f = \$%.2f (Score: %d/10)\n",
+            $ticker, $sector, $shares, $price, $total_cost, $score;
+
+        if (!$dry_run) {
+            record_trade(
+                $dbh,
+                ticker         => $ticker,
+                action         => 'BUY',
+                shares         => $shares,
+                fill_price     => $price,
+                total_amount   => $total_cost,
+                catalyst_score => $score,
+                rationale      => sprintf("Score %d/10 catalyst: %s", $score, $cat->{rationale} // $cat->{headline})
+            );
+            upsert_position($dbh, $ticker, $shares, $price, $price, $sector);
+            $cash -= $total_cost;
+            $sector_values{$sector} += $total_cost;
+            $existing_tickers{$ticker} = { shares => $shares, cost_basis => $price };
+            printf "    -> FILLED: %s position opened. Remaining cash: \$%.2f\n", $ticker, $cash;
+        }
+    }
+}
+
+# --- STEP 3: UPDATE DAILY NAV & BENCHMARK ALPHA ---
+my $updated_positions = get_positions($dbh);
+my $positions_value = 0.0;
+for my $p (@$updated_positions) {
+    my $mkt = fetch_market_price($p->{ticker}) // $p->{cost_basis};
+    $positions_value += $p->{shares} * $mkt;
+}
+
+my $new_total_nav = $cash + $positions_value;
+my $hwm = $nav_info->{high_water_mark} // $total_nav;
+$hwm = $new_total_nav if $new_total_nav > $hwm;
+my $new_drawdown = ($hwm > 0) ? (($hwm - $new_total_nav) / $hwm) : 0.0;
+
+my $starting_capital = $ENV{STARTING_CAPITAL} // 10000.00;
+my $portfolio_return = ($new_total_nav - $starting_capital) / $starting_capital;
+
+my $spy_price = fetch_market_price($benchmark) // $nav_info->{spy_price};
+# Calculate SPY return from Day 0
+my ($day0_spy) = $dbh->selectrow_array("SELECT spy_price FROM daily_nav ORDER BY date ASC LIMIT 1");
+$day0_spy //= $spy_price;
+my $spy_return = ($day0_spy > 0) ? (($spy_price - $day0_spy) / $day0_spy) : 0.0;
+my $alpha = $portfolio_return - $spy_return;
+
+if (!$dry_run) {
+    record_nav(
+        $dbh,
+        date             => $today,
+        cash             => $cash,
+        positions_value  => $positions_value,
+        total_nav        => $new_total_nav,
+        spy_price        => $spy_price,
+        portfolio_return => $portfolio_return,
+        spy_return       => $spy_return,
+        alpha            => $alpha,
+        high_water_mark  => $hwm,
+        drawdown         => $new_drawdown
+    );
+    printf "[portfolio_engine] Ledger updated: Total NAV: \$%.2f | Cash: \$%.2f (%.1f%%) | Alpha: %+.2f%%\n",
+        $new_total_nav, $cash, ($cash / $new_total_nav) * 100, $alpha * 100;
+} else {
+    printf "[portfolio_engine] [DRY RUN] Projected NAV: \$%.2f | Projected Cash: \$%.2f (%.1f%%)\n",
+        $new_total_nav, $cash, ($cash / $new_total_nav) * 100;
+}
+
+$dbh->disconnect;
+
+__END__
+
+=head1 NAME
+
+portfolio_engine.pl - Enforce risk management, position sizing, and stop-loss logic
+
+=head1 SYNOPSIS
+
+portfolio_engine.pl [options]
+
+ Options:
+   --dry-run       Verify risk calculations without executing trades
+   --db=PATH       Path to SQLite database
+   --help, -h      Show this help message
+
+=cut
