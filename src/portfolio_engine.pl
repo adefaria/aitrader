@@ -8,6 +8,7 @@ use lib "$RealBin/lib";
 use Getopt::Long qw(:config no_ignore_case);
 use Pod::Usage;
 use POSIX qw(strftime floor);
+use Mojo::JSON qw(encode_json);
 use Trader::DB qw(
     get_dbh get_latest_nav get_positions fetch_market_price
     record_trade record_nav get_actionable_catalysts upsert_position close_position
@@ -19,12 +20,14 @@ eval {
 };
 
 my $dry_run = 0;
+my $propose = 0;
 my $help    = 0;
 my $db_path = $ENV{DB_PATH} // "$RealBin/../data/paper_ledger.db";
 my $benchmark = $ENV{BENCHMARK_TICKER} // 'SPY';
 
 GetOptions(
     'dry-run' => \$dry_run,
+    'propose' => \$propose,
     'db=s'    => \$db_path,
     'help|h'  => \$help,
 ) or pod2usage(2);
@@ -59,6 +62,7 @@ if ($drawdown >= 0.12) {
 my $positions = get_positions($dbh);
 my %existing_tickers = map { $_->{ticker} => $_ } @$positions;
 my %sector_values;
+my @proposed_trades;
 
 for my $pos (@$positions) {
     my $current_price = fetch_market_price($pos->{ticker}) // $pos->{cost_basis};
@@ -93,8 +97,22 @@ for my $pos (@$positions) {
 
     if ($exit_triggered) {
         printf "    [EXIT ORDER] %s: %s\n", $pos->{ticker}, $exit_reason;
-        if (!$dry_run) {
-            my $proceeds = $pos->{shares} * $current_price;
+        my $proceeds = $pos->{shares} * $current_price;
+        if ($propose) {
+            push @proposed_trades, {
+                ticker         => $pos->{ticker},
+                action         => 'SELL',
+                shares         => $pos->{shares} + 0,
+                price          => sprintf("%.2f", $current_price) + 0,
+                total_amount   => sprintf("%.2f", $proceeds) + 0,
+                sector         => $sector,
+                catalyst_score => undef,
+                rationale      => $exit_reason,
+            };
+            $cash += $proceeds;
+            delete $existing_tickers{$pos->{ticker}};
+            $sector_values{$sector} -= $market_val;
+        } elsif (!$dry_run) {
             record_trade(
                 $dbh,
                 ticker         => $pos->{ticker},
@@ -202,7 +220,23 @@ if (!$buys_halted) {
         printf "  - [BUY ORDER CANDIDATE] %s (%s): %d shares @ \$%.2f = \$%.2f (Score: %d/10)\n",
             $ticker, $sector, $shares, $price, $total_cost, $score;
 
-        if (!$dry_run) {
+        my $trade_rationale = sprintf("Score %d/10 catalyst: %s", $score, $cat->{rationale} // $cat->{headline});
+
+        if ($propose) {
+            push @proposed_trades, {
+                ticker         => $ticker,
+                action         => 'BUY',
+                shares         => $shares + 0,
+                price          => sprintf("%.2f", $price) + 0,
+                total_amount   => sprintf("%.2f", $total_cost) + 0,
+                sector         => $sector,
+                catalyst_score => $score + 0,
+                rationale      => $trade_rationale,
+            };
+            $cash -= $total_cost;
+            $sector_values{$sector} += $total_cost;
+            $existing_tickers{$ticker} = { shares => $shares, cost_basis => $price };
+        } elsif (!$dry_run) {
             record_trade(
                 $dbh,
                 ticker         => $ticker,
@@ -211,7 +245,7 @@ if (!$buys_halted) {
                 fill_price     => $price,
                 total_amount   => $total_cost,
                 catalyst_score => $score,
-                rationale      => sprintf("Score %d/10 catalyst: %s", $score, $cat->{rationale} // $cat->{headline})
+                rationale      => $trade_rationale
             );
             upsert_position($dbh, $ticker, $shares, $price, $price, $sector);
             $cash -= $total_cost;
@@ -223,6 +257,7 @@ if (!$buys_halted) {
 }
 
 # --- STEP 3: UPDATE DAILY NAV & BENCHMARK ALPHA ---
+my $actual_cash = $propose ? $nav_info->{cash} : $cash;
 my $updated_positions = get_positions($dbh);
 my $positions_value = 0.0;
 for my $p (@$updated_positions) {
@@ -230,7 +265,7 @@ for my $p (@$updated_positions) {
     $positions_value += $p->{shares} * $mkt;
 }
 
-my $new_total_nav = $cash + $positions_value;
+my $new_total_nav = $actual_cash + $positions_value;
 my $hwm = $nav_info->{high_water_mark} // $total_nav;
 $hwm = $new_total_nav if $new_total_nav > $hwm;
 my $new_drawdown = ($hwm > 0) ? (($hwm - $new_total_nav) / $hwm) : 0.0;
@@ -249,7 +284,7 @@ if (!$dry_run) {
     record_nav(
         $dbh,
         date             => $today,
-        cash             => $cash,
+        cash             => $actual_cash,
         positions_value  => $positions_value,
         total_nav        => $new_total_nav,
         spy_price        => $spy_price,
@@ -260,10 +295,14 @@ if (!$dry_run) {
         drawdown         => $new_drawdown
     );
     printf "[portfolio_engine] Ledger updated: Total NAV: \$%.2f | Cash: \$%.2f (%.1f%%) | Alpha: %+.2f%%\n",
-        $new_total_nav, $cash, ($cash / $new_total_nav) * 100, $alpha * 100;
+        $new_total_nav, $actual_cash, ($actual_cash / $new_total_nav) * 100, $alpha * 100;
 } else {
     printf "[portfolio_engine] [DRY RUN] Projected NAV: \$%.2f | Projected Cash: \$%.2f (%.1f%%)\n",
-        $new_total_nav, $cash, ($cash / $new_total_nav) * 100;
+        $new_total_nav, $actual_cash, ($actual_cash / $new_total_nav) * 100;
+}
+
+if ($propose) {
+    print "__PROPOSED_TRADES_JSON__:" . encode_json(\@proposed_trades) . "\n";
 }
 
 $dbh->disconnect;

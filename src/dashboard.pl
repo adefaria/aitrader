@@ -6,9 +6,13 @@ use FindBin qw($RealBin);
 use lib "$RealBin/lib";
 
 use Mojolicious::Lite -signatures;
+use Mojo::JSON qw(decode_json encode_json);
+use POSIX qw(strftime);
+use File::Spec;
 use Trader::DB qw(
     get_dbh get_latest_nav get_positions fetch_market_price
-    fetch_market_indices get_git_commit
+    fetch_market_indices get_git_commit record_trade record_nav
+    upsert_position close_position
 );
 
 eval {
@@ -160,6 +164,287 @@ get '/api/status' => sub ($c) {
         positions  => $positions,
         indices    => $indices,
         git_commit => get_git_commit(),
+    });
+};
+
+get '/api/history' => sub ($c) {
+    my $dbh = $c->db;
+    my $rows = $dbh->selectall_arrayref(
+        "SELECT date, cash, positions_value, total_nav, spy_price, portfolio_return, spy_return, alpha, high_water_mark, drawdown FROM daily_nav ORDER BY date ASC",
+        { Slice => {} }
+    );
+    $dbh->disconnect;
+
+    $c->render(json => {
+        success => 1,
+        history => $rows,
+    });
+};
+
+sub _write_eval_status ($path, $data) {
+    my $tmp = "$path.tmp.$$";
+    if (open my $fh, '>', $tmp) {
+        binmode $fh, ':encoding(UTF-8)';
+        print $fh encode_json($data);
+        close $fh;
+        rename $tmp, $path;
+    }
+}
+
+post '/api/evaluate/start' => sub ($c) {
+    my $job_id = time() . '_' . $$ . '_' . int(rand(100000));
+    my $status_file = File::Spec->catfile(File::Spec->tmpdir(), "aitrader_eval_$job_id.json");
+
+    my $state = {
+        job_id          => $job_id,
+        step            => 0,
+        total_steps     => 5,
+        percent         => 5,
+        label           => 'Initializing market evaluation...',
+        log             => '',
+        done            => \0,
+        success         => \0,
+        proposed_trades => [],
+    };
+    _write_eval_status($status_file, $state);
+
+    my $pid = fork();
+    if (!defined $pid) {
+        return $c->render(status => 500, json => {
+            success => 0,
+            message => "Failed to spawn evaluation worker: $!",
+        });
+    }
+
+    if ($pid == 0) {
+        # Child worker process
+        my $cmd = "perl -Ilocal/lib/perl5 -I$RealBin/lib $RealBin/run_daily.pl --propose 2>&1";
+        if (open my $fh, '-|', $cmd) {
+            while (my $line = <$fh>) {
+                if ($line =~ /^__PROPOSED_TRADES_JSON__:(.*)$/) {
+                    my $json_str = $1;
+                    my $parsed = eval { decode_json($json_str) };
+                    $state->{proposed_trades} = $parsed if ref $parsed eq 'ARRAY';
+                    next;
+                }
+                $state->{log} .= $line;
+                if ($line =~ /\[Step\s+(\d+)\/(\d+)\]\s*(.+?)\s*-*\s*$/) {
+                    my ($s, $tot, $lbl) = ($1 + 0, $2 + 0, $3);
+                    $state->{step} = $s;
+                    $state->{total_steps} = $tot;
+                    $state->{percent} = int(($s / $tot) * 85) + 5;
+                    $state->{label} = "Step $s/$tot: $lbl";
+                } elsif ($line =~ /\[evaluate_catalysts\]\s+Evaluating/) {
+                    $state->{percent} = 78;
+                } elsif ($line =~ /\[portfolio_engine\]\s+Evaluating/) {
+                    $state->{percent} = 90;
+                }
+                _write_eval_status($status_file, $state);
+            }
+            close $fh;
+            my $exit_code = $? >> 8;
+            $state->{done} = \1;
+            $state->{percent} = 100;
+            if ($exit_code == 0) {
+                $state->{success} = \1;
+                $state->{label} = 'Market evaluation complete.';
+            } else {
+                $state->{success} = \0;
+                $state->{label} = "Market evaluation failed (exit code $exit_code).";
+            }
+        } else {
+            $state->{done} = \1;
+            $state->{success} = \0;
+            $state->{percent} = 100;
+            $state->{label} = "Failed to launch run_daily.pl: $!";
+            $state->{log} .= "Error: $!\n";
+        }
+        _write_eval_status($status_file, $state);
+        POSIX::_exit(0);
+    }
+
+    # Reap zombies non-blockingly when convenient
+    $SIG{CHLD} = 'IGNORE';
+
+    $c->render(json => {
+        success => 1,
+        job_id  => $job_id,
+    });
+};
+
+get '/api/evaluate/status/:id' => sub ($c) {
+    my $id = $c->param('id') // '';
+    if ($id !~ /^[a-zA-Z0-9_]+$/) {
+        return $c->render(status => 400, json => { success => 0, message => 'Invalid job ID.' });
+    }
+    my $status_file = File::Spec->catfile(File::Spec->tmpdir(), "aitrader_eval_$id.json");
+    if (!-f $status_file) {
+        return $c->render(status => 404, json => { success => 0, message => 'Evaluation job not found.' });
+    }
+    local $/;
+    open my $fh, '<:encoding(UTF-8)', $status_file or return $c->render(status => 500, json => { success => 0, message => "Cannot read status: $!" });
+    my $raw = <$fh>;
+    close $fh;
+
+    my $data = eval { decode_json($raw) };
+    if (!$data) {
+        return $c->render(status => 500, json => { success => 0, message => 'Invalid status payload.' });
+    }
+
+    if ($data->{done} && $data->{success}) {
+        %PRICE_CACHE = ();
+        $INDICES_CACHE = undef;
+    }
+
+    $c->render(json => $data);
+};
+
+post '/api/trades/execute' => sub ($c) {
+    my $payload = $c->req->json;
+    my $trades = ($payload && ref $payload->{trades} eq 'ARRAY') ? $payload->{trades} : [];
+
+    if (!@$trades) {
+        return $c->render(json => {
+            success        => 1,
+            executed_count => 0,
+            message        => 'No trades selected for execution.',
+        });
+    }
+
+    my $dbh = $c->db;
+    my $nav_info = get_latest_nav($dbh);
+    if (!$nav_info) {
+        $dbh->disconnect;
+        return $c->render(status => 400, json => {
+            success => 0,
+            message => 'Ledger not initialized. Run market evaluation first.',
+        });
+    }
+
+    my $cash = $nav_info->{cash};
+    my $positions = get_positions($dbh);
+    my %pos_map = map { $_->{ticker} => $_ } @$positions;
+
+    my $executed = 0;
+    my @skipped;
+
+    for my $t (@$trades) {
+        my $ticker = uc($t->{ticker} // '');
+        my $action = uc($t->{action} // '');
+        my $shares = ($t->{shares} // 0) + 0;
+        next unless $ticker && ($action eq 'BUY' || $action eq 'SELL') && $shares > 0;
+
+        my $fill_price = fetch_market_price($ticker) // ($t->{price} + 0);
+        if (!$fill_price || $fill_price <= 0) {
+            push @skipped, "$ticker: unable to determine market price";
+            next;
+        }
+
+        if ($action eq 'SELL') {
+            my $pos = $pos_map{$ticker};
+            if (!$pos || $pos->{shares} <= 0) {
+                push @skipped, "$ticker: no open position to sell";
+                next;
+            }
+            my $sell_shares = ($shares >= $pos->{shares}) ? $pos->{shares} : $shares;
+            my $proceeds = $sell_shares * $fill_price;
+            record_trade(
+                $dbh,
+                ticker         => $ticker,
+                action         => 'SELL',
+                shares         => $sell_shares,
+                fill_price     => $fill_price,
+                total_amount   => $proceeds,
+                catalyst_score => $t->{catalyst_score},
+                rationale      => $t->{rationale} // 'User-approved exit trade',
+            );
+            if ($sell_shares >= $pos->{shares}) {
+                close_position($dbh, $ticker);
+                delete $pos_map{$ticker};
+            } else {
+                my $rem = $pos->{shares} - $sell_shares;
+                upsert_position($dbh, $ticker, $rem, $pos->{cost_basis}, $pos->{high_water_mark}, $pos->{sector});
+                $pos->{shares} = $rem;
+            }
+            $cash += $proceeds;
+            $executed++;
+        } elsif ($action eq 'BUY') {
+            my $total_cost = $shares * $fill_price;
+            if ($total_cost > $cash) {
+                push @skipped, sprintf("%s: insufficient cash (\$%.2f needed, \$%.2f available)", $ticker, $total_cost, $cash);
+                next;
+            }
+            my $sector = $t->{sector} // 'General Equities';
+            record_trade(
+                $dbh,
+                ticker         => $ticker,
+                action         => 'BUY',
+                shares         => $shares,
+                fill_price     => $fill_price,
+                total_amount   => $total_cost,
+                catalyst_score => $t->{catalyst_score},
+                rationale      => $t->{rationale} // 'User-approved entry trade',
+            );
+            if (my $existing = $pos_map{$ticker}) {
+                my $new_shares = $existing->{shares} + $shares;
+                my $new_basis  = (($existing->{shares} * $existing->{cost_basis}) + $total_cost) / $new_shares;
+                my $hwm = ($fill_price > ($existing->{high_water_mark} // 0)) ? $fill_price : $existing->{high_water_mark};
+                upsert_position($dbh, $ticker, $new_shares, $new_basis, $hwm, $sector);
+                $existing->{shares} = $new_shares;
+                $existing->{cost_basis} = $new_basis;
+            } else {
+                upsert_position($dbh, $ticker, $shares, $fill_price, $fill_price, $sector);
+                $pos_map{$ticker} = { shares => $shares, cost_basis => $fill_price, high_water_mark => $fill_price, sector => $sector };
+            }
+            $cash -= $total_cost;
+            $executed++;
+        }
+    }
+
+    # Recompute daily_nav after trade execution
+    my $updated_positions = get_positions($dbh);
+    my $positions_value = 0.0;
+    for my $p (@$updated_positions) {
+        my $mkt = fetch_market_price($p->{ticker}) // $p->{cost_basis};
+        $positions_value += $p->{shares} * $mkt;
+    }
+    my $new_total_nav = $cash + $positions_value;
+    my $hwm = $nav_info->{high_water_mark} // $new_total_nav;
+    $hwm = $new_total_nav if $new_total_nav > $hwm;
+    my $new_drawdown = ($hwm > 0) ? (($hwm - $new_total_nav) / $hwm) : 0.0;
+    my $starting_capital = $ENV{STARTING_CAPITAL} // 10000.00;
+    my $portfolio_return = ($new_total_nav - $starting_capital) / $starting_capital;
+    my $benchmark = $ENV{BENCHMARK_TICKER} // 'SPY';
+    my $spy_price = fetch_market_price($benchmark) // $nav_info->{spy_price};
+    my ($day0_spy) = $dbh->selectrow_array("SELECT spy_price FROM daily_nav ORDER BY date ASC LIMIT 1");
+    $day0_spy //= $spy_price;
+    my $spy_return = ($day0_spy > 0) ? (($spy_price - $day0_spy) / $day0_spy) : 0.0;
+    my $alpha = $portfolio_return - $spy_return;
+    my $today = strftime("%Y-%m-%d", localtime);
+
+    record_nav(
+        $dbh,
+        date             => $today,
+        cash             => $cash,
+        positions_value  => $positions_value,
+        total_nav        => $new_total_nav,
+        spy_price        => $spy_price,
+        portfolio_return => $portfolio_return,
+        spy_return       => $spy_return,
+        alpha            => $alpha,
+        high_water_mark  => $hwm,
+        drawdown         => $new_drawdown,
+    );
+
+    $dbh->disconnect;
+    %PRICE_CACHE = ();
+    $INDICES_CACHE = undef;
+
+    $c->render(json => {
+        success        => 1,
+        executed_count => $executed,
+        skipped        => \@skipped,
+        message        => "Executed $executed trade(s) successfully.",
     });
 };
 
@@ -418,7 +703,18 @@ __DATA__
     /* Primary Stats Grid */
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
     .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; box-shadow: var(--shadow); }
-    .card-title { font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; font-weight: 600; }
+    .clickable-card {
+      cursor: pointer;
+      transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .clickable-card:hover {
+      transform: translateY(-2px);
+      border-color: var(--accent-primary);
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
+    }
+    .card-title { font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+    .card-chart-hint { font-size: 0.85rem; opacity: 0.65; transition: opacity 0.15s ease; }
+    .clickable-card:hover .card-chart-hint { opacity: 1; color: var(--accent-primary); }
     .card-value { font-size: 1.7rem; font-weight: 800; font-family: monospace; }
     .card-sub { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
 
@@ -496,6 +792,233 @@ __DATA__
       animation: fadeIn 0.3s;
     }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* Modal Dialogs */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.68);
+      backdrop-filter: blur(3px);
+      z-index: 2000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .modal-backdrop.active { display: flex; }
+    .modal-dialog {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 820px;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+      overflow: hidden;
+      animation: fadeIn 0.2s ease;
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--card-inner);
+    }
+    .modal-title { font-size: 1.1rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+    .modal-close {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      font-size: 1.4rem;
+      line-height: 1;
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-close:hover { background: var(--accent-hover); color: var(--text); border-color: var(--border); }
+    .modal-body { padding: 20px; overflow-y: auto; flex: 1; }
+    .modal-footer {
+      padding: 14px 20px;
+      border-top: 1px solid var(--border);
+      background: var(--card-inner);
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* Metric Chart Modal */
+    .metric-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .metric-tab {
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      background: var(--card-inner);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .metric-tab:hover { color: var(--text); border-color: var(--accent-primary); }
+    .metric-tab.active { background: var(--accent-primary); color: #ffffff; border-color: var(--accent-primary); }
+    .chart-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .chart-stat-box {
+      background: var(--card-inner);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 12px;
+    }
+    .chart-stat-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; }
+    .chart-stat-val { font-size: 1rem; font-weight: 700; font-family: monospace; margin-top: 2px; }
+    .chart-wrap {
+      position: relative;
+      background: var(--card-inner);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .chart-tooltip {
+      display: none;
+      position: absolute;
+      pointer-events: none;
+      background: var(--card-bg);
+      border: 1px solid var(--accent-primary);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 0.78rem;
+      box-shadow: var(--shadow);
+      z-index: 10;
+      white-space: nowrap;
+    }
+
+    /* Progress Bar & Evaluation Dialog */
+    .eval-progress-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.88rem;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .progress-track {
+      width: 100%;
+      height: 12px;
+      background: var(--card-inner);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      overflow: hidden;
+      margin-bottom: 14px;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--accent-primary), var(--success));
+      border-radius: 999px;
+      transition: width 0.35s ease;
+    }
+    .eval-log-toggle {
+      font-size: 0.78rem;
+      color: var(--accent-primary);
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 0;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+    .eval-log {
+      display: none;
+      background: var(--accent-black);
+      color: #c9d1d9;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-family: monospace;
+      font-size: 0.75rem;
+      max-height: 170px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      margin-bottom: 16px;
+    }
+    .eval-log.open { display: block; }
+    .suggested-trades-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin: 12px 0 10px;
+      font-weight: 700;
+      font-size: 0.95rem;
+    }
+    .eval-empty-box {
+      background: var(--card-inner);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.88rem;
+    }
+
+    /* Toggle Switch */
+    .toggle-switch {
+      position: relative;
+      display: inline-block;
+      width: 42px;
+      height: 22px;
+    }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute;
+      cursor: pointer;
+      inset: 0;
+      background-color: var(--border);
+      transition: 0.2s;
+      border-radius: 22px;
+    }
+    .toggle-slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      bottom: 3px;
+      background-color: #ffffff;
+      transition: 0.2s;
+      border-radius: 50%;
+    }
+    .toggle-switch input:checked + .toggle-slider { background-color: var(--success); }
+    .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); }
+
+    .btn-primary {
+      background: var(--accent-primary);
+      color: #ffffff;
+      border-color: var(--accent-primary);
+    }
+    .btn-primary:hover { opacity: 0.92; }
+    .btn-secondary {
+      background: var(--card-bg);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .btn-secondary:hover { background: var(--accent-hover); }
   </style>
 </head>
 <body>
@@ -559,23 +1082,35 @@ __DATA__
 
   <!-- Primary NAV & Benchmark Cards -->
   <div class="grid">
-    <div class="card">
-      <div class="card-title">Total Portfolio NAV</div>
+    <div class="card clickable-card" onclick="openMetricModal('total_nav')" title="Click to view Total Portfolio NAV over time">
+      <div class="card-title">
+        <span>Total Portfolio NAV</span>
+        <span class="card-chart-hint">📈</span>
+      </div>
       <div class="card-value">$<%= sprintf("%.2f", $nav->{total_nav}) %></div>
       <div class="card-sub">Baseline Capital: $10,000.00</div>
     </div>
-    <div class="card">
-      <div class="card-title">Cash Reserve Floor</div>
+    <div class="card clickable-card" onclick="openMetricModal('cash')" title="Click to view Cash Reserve Floor over time">
+      <div class="card-title">
+        <span>Cash Reserve Floor</span>
+        <span class="card-chart-hint">📈</span>
+      </div>
       <div class="card-value">$<%= sprintf("%.2f", $nav->{cash}) %></div>
       <div class="card-sub"><%= sprintf("%.1f", ($nav->{cash} / ($nav->{total_nav} || 1)) * 100) %>% Allocation (Min: 10%)</div>
     </div>
-    <div class="card">
-      <div class="card-title">SPY Inception Price</div>
+    <div class="card clickable-card" onclick="openMetricModal('spy_price')" title="Click to view SPY Price over time">
+      <div class="card-title">
+        <span>SPY Inception Price</span>
+        <span class="card-chart-hint">📈</span>
+      </div>
       <div class="card-value">$<%= sprintf("%.2f", $nav->{spy_price}) %></div>
       <div class="card-sub">Primary S&amp;P 500 Benchmark</div>
     </div>
-    <div class="card">
-      <div class="card-title">Alpha (vs SPY)</div>
+    <div class="card clickable-card" onclick="openMetricModal('alpha')" title="Click to view Alpha (vs SPY) over time">
+      <div class="card-title">
+        <span>Alpha (vs SPY)</span>
+        <span class="card-chart-hint">📈</span>
+      </div>
       <div class="card-value <%= $nav->{alpha} >= 0 ? 'positive' : 'negative' %>">
         <%= sprintf("%+.2f", $nav->{alpha} * 100) %>%
       </div>
@@ -745,6 +1280,66 @@ __DATA__
 
   <div id="toast"></div>
 
+  <!-- Metric History Graph Modal -->
+  <div id="metricModal" class="modal-backdrop" onclick="if(event.target === this) closeMetricModal()">
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="metricModalTitle">
+      <div class="modal-header">
+        <div id="metricModalTitle" class="modal-title">📈 Metric Performance Over Time</div>
+        <button type="button" class="modal-close" onclick="closeMetricModal()" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="metric-tabs">
+          <button type="button" class="metric-tab" data-metric="total_nav" onclick="switchMetricTab('total_nav')">Total Portfolio NAV</button>
+          <button type="button" class="metric-tab" data-metric="cash" onclick="switchMetricTab('cash')">Cash Reserve Floor</button>
+          <button type="button" class="metric-tab" data-metric="spy_price" onclick="switchMetricTab('spy_price')">SPY Price</button>
+          <button type="button" class="metric-tab" data-metric="alpha" onclick="switchMetricTab('alpha')">Alpha (vs SPY)</button>
+        </div>
+        <div id="metricStats" class="chart-stats"></div>
+        <div class="chart-wrap">
+          <div id="chartTooltip" class="chart-tooltip"></div>
+          <div id="metricChartContainer"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeMetricModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Evaluate the Market Modal -->
+  <div id="evalModal" class="modal-backdrop">
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="evalModalTitle">
+      <div class="modal-header">
+        <div id="evalModalTitle" class="modal-title">⚡ Market Evaluation &amp; Trade Proposals</div>
+        <button type="button" id="evalCloseX" class="modal-close" onclick="closeEvalModal()" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="eval-progress-header">
+          <span id="evalStepLabel">Starting market evaluation...</span>
+          <span id="evalPercentLabel">0%</span>
+        </div>
+        <div class="progress-track">
+          <div id="evalProgressFill" class="progress-fill"></div>
+        </div>
+
+        <button type="button" id="evalLogToggle" class="eval-log-toggle" onclick="toggleEvalLog()">Show execution log ▾</button>
+        <pre id="evalLog" class="eval-log"></pre>
+
+        <div id="evalTradesSection" style="display: none;">
+          <div class="suggested-trades-header">
+            <span>Suggested Trades</span>
+            <span id="evalTradesSummary" style="font-size: 0.8rem; font-weight: 500; color: var(--text-muted);"></span>
+          </div>
+          <div id="evalTradesBody"></div>
+        </div>
+      </div>
+      <div id="evalModalFooter" class="modal-footer">
+        <button type="button" id="btnEvalCancel" class="btn btn-secondary" onclick="closeEvalModal()" disabled>Close</button>
+        <button type="button" id="btnExecuteTrades" class="btn btn-primary" onclick="executeSelectedTrades()" style="display: none;">Execute Selected Trades</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     // Theme Management (System / Light / Dark) matching other DeFaria web apps
     let currentThemeMode = 'system';
@@ -824,7 +1419,22 @@ __DATA__
       });
     }
 
-    // Evaluate the Market trigger
+    function apiUrl(subpath) {
+      const base = window.location.pathname.endsWith('/')
+        ? window.location.pathname
+        : window.location.pathname + '/';
+      return base + subpath.replace(/^\/+/, '');
+    }
+
+    function escapeHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // Toast Notification
     function showToast(msg) {
       const toast = document.getElementById('toast');
       toast.textContent = msg;
@@ -832,33 +1442,460 @@ __DATA__
       setTimeout(() => { toast.style.display = 'none'; }, 4000);
     }
 
+    // =========================================================================
+    // Metric History Graph Modal
+    // =========================================================================
+    const METRIC_META = {
+      total_nav: {
+        title: 'Total Portfolio NAV Over Time',
+        extract: r => Number(r.total_nav || 0),
+        format: v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        baseline: 10000,
+        baselineLabel: 'Baseline ($10,000)',
+        color: '#388bfd',
+      },
+      cash: {
+        title: 'Cash Reserve Floor Over Time',
+        extract: r => Number(r.cash || 0),
+        format: v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        baseline: null,
+        color: '#d29922',
+      },
+      spy_price: {
+        title: 'SPY Benchmark Price Over Time',
+        extract: r => Number(r.spy_price || 0),
+        format: v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        baseline: null,
+        color: '#a371f7',
+      },
+      alpha: {
+        title: 'Alpha (vs SPY) Over Time',
+        extract: r => Number(r.alpha || 0) * 100,
+        format: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%',
+        baseline: 0,
+        baselineLabel: '0.00% Parity',
+        color: '#3fb950',
+      },
+    };
+
+    let cachedHistory = null;
+    let activeMetricKey = 'total_nav';
+
+    async function openMetricModal(metricKey) {
+      activeMetricKey = metricKey;
+      document.getElementById('metricModal').classList.add('active');
+      updateMetricTabs();
+      document.getElementById('metricChartContainer').innerHTML =
+        '<div style="text-align:center; padding:48px; color:var(--text-muted);">Loading historical data...</div>';
+      document.getElementById('metricStats').innerHTML = '';
+
+      try {
+        const res = await fetch(apiUrl('api/history'));
+        const data = await res.json();
+        cachedHistory = (data && data.history) ? data.history : [];
+        renderMetricChart(cachedHistory, activeMetricKey);
+      } catch (err) {
+        document.getElementById('metricChartContainer').innerHTML =
+          '<div style="text-align:center; padding:48px; color:var(--danger);">Failed to load historical metrics.</div>';
+      }
+    }
+
+    function switchMetricTab(metricKey) {
+      activeMetricKey = metricKey;
+      updateMetricTabs();
+      if (cachedHistory) {
+        renderMetricChart(cachedHistory, activeMetricKey);
+      }
+    }
+
+    function updateMetricTabs() {
+      const meta = METRIC_META[activeMetricKey];
+      document.getElementById('metricModalTitle').textContent = '📈 ' + meta.title;
+      document.querySelectorAll('.metric-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.getAttribute('data-metric') === activeMetricKey);
+      });
+    }
+
+    function closeMetricModal() {
+      document.getElementById('metricModal').classList.remove('active');
+      document.getElementById('chartTooltip').style.display = 'none';
+    }
+
+    function renderMetricChart(history, metricKey) {
+      const meta = METRIC_META[metricKey];
+      const container = document.getElementById('metricChartContainer');
+      const statsEl = document.getElementById('metricStats');
+      const tooltip = document.getElementById('chartTooltip');
+      tooltip.style.display = 'none';
+
+      if (!history || history.length === 0) {
+        statsEl.innerHTML = '';
+        container.innerHTML = '<div style="text-align:center; padding:48px; color:var(--text-muted);">No historical ledger snapshots recorded yet. Run "Evaluate the Market" to record your first snapshot.</div>';
+        return;
+      }
+
+      const points = history.map(r => ({
+        date: r.date,
+        value: meta.extract(r),
+      }));
+
+      const values = points.map(p => p.value);
+      const currentVal = values[values.length - 1];
+      const startVal = values[0];
+      const minVal = Math.min(...values);
+      const maxVal = Math.max(...values);
+
+      statsEl.innerHTML = `
+        <div class="chart-stat-box"><div class="chart-stat-label">Latest</div><div class="chart-stat-val">${meta.format(currentVal)}</div></div>
+        <div class="chart-stat-box"><div class="chart-stat-label">Inception</div><div class="chart-stat-val">${meta.format(startVal)}</div></div>
+        <div class="chart-stat-box"><div class="chart-stat-label">Min</div><div class="chart-stat-val">${meta.format(minVal)}</div></div>
+        <div class="chart-stat-box"><div class="chart-stat-label">Max</div><div class="chart-stat-val">${meta.format(maxVal)}</div></div>
+        <div class="chart-stat-box"><div class="chart-stat-label">Data Points</div><div class="chart-stat-val">${points.length}</div></div>
+      `;
+
+      const width = 740;
+      const height = 300;
+      const pad = { top: 22, right: 24, bottom: 38, left: 76 };
+      const plotW = width - pad.left - pad.right;
+      const plotH = height - pad.top - pad.bottom;
+
+      let yMin = minVal;
+      let yMax = maxVal;
+      if (meta.baseline !== null) {
+        yMin = Math.min(yMin, meta.baseline);
+        yMax = Math.max(yMax, meta.baseline);
+      }
+      if (yMin === yMax) {
+        const padAmt = Math.abs(yMin) > 0 ? Math.abs(yMin) * 0.05 : 1;
+        yMin -= padAmt;
+        yMax += padAmt;
+      } else {
+        const span = yMax - yMin;
+        yMin -= span * 0.12;
+        yMax += span * 0.12;
+      }
+
+      const xFor = i => points.length === 1 ? pad.left + plotW / 2 : pad.left + (i / (points.length - 1)) * plotW;
+      const yFor = v => pad.top + ((yMax - v) / (yMax - yMin)) * plotH;
+
+      let gridSvg = '';
+      const yTicks = 5;
+      for (let i = 0; i <= yTicks; i++) {
+        const v = yMin + (i / yTicks) * (yMax - yMin);
+        const y = yFor(v);
+        gridSvg += `<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="var(--border)" stroke-dasharray="3,3" stroke-width="1"/>`;
+        gridSvg += `<text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" fill="var(--text-muted)" font-size="11" font-family="monospace">${escapeHtml(meta.format(v))}</text>`;
+      }
+
+      if (meta.baseline !== null && meta.baseline >= yMin && meta.baseline <= yMax) {
+        const by = yFor(meta.baseline);
+        gridSvg += `<line x1="${pad.left}" y1="${by}" x2="${width - pad.right}" y2="${by}" stroke="var(--text-muted)" stroke-dasharray="6,4" stroke-width="1.2" opacity="0.7"/>`;
+        gridSvg += `<text x="${width - pad.right}" y="${by - 5}" text-anchor="end" fill="var(--text-muted)" font-size="10">${escapeHtml(meta.baselineLabel || '')}</text>`;
+      }
+
+      const coords = points.map((p, i) => ({ x: xFor(i), y: yFor(p.value), ...p }));
+      let pathSvg = '';
+      if (coords.length > 1) {
+        const lineD = coords.map((c, i) => `${i === 0 ? 'M' : 'L'} ${c.x.toFixed(1)} ${c.y.toFixed(1)}`).join(' ');
+        const areaD = `${lineD} L ${coords[coords.length - 1].x.toFixed(1)} ${(pad.top + plotH).toFixed(1)} L ${coords[0].x.toFixed(1)} ${(pad.top + plotH).toFixed(1)} Z`;
+        pathSvg += `<path d="${areaD}" fill="${meta.color}" opacity="0.14"/>`;
+        pathSvg += `<path d="${lineD}" fill="none" stroke="${meta.color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+      }
+
+      let xLabelsSvg = '';
+      const maxXLabels = Math.min(points.length, 6);
+      const step = points.length <= 1 ? 1 : Math.max(1, Math.floor((points.length - 1) / (maxXLabels - 1)));
+      for (let i = 0; i < points.length; i += step) {
+        xLabelsSvg += `<text x="${coords[i].x}" y="${height - 10}" text-anchor="middle" fill="var(--text-muted)" font-size="11" font-family="monospace">${escapeHtml(points[i].date)}</text>`;
+      }
+      if (points.length > 1 && ((points.length - 1) % step !== 0)) {
+        const last = coords[coords.length - 1];
+        xLabelsSvg += `<text x="${last.x}" y="${height - 10}" text-anchor="middle" fill="var(--text-muted)" font-size="11" font-family="monospace">${escapeHtml(last.date)}</text>`;
+      }
+
+      const dotsSvg = coords.map((c, idx) => `
+        <circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="${coords.length === 1 ? 6 : 4}" fill="${meta.color}" stroke="var(--card-bg)" stroke-width="2" class="chart-dot" data-idx="${idx}" style="cursor:pointer;"/>
+      `).join('');
+
+      const noteHtml = points.length === 1
+        ? `<div style="text-align:center; font-size:0.78rem; color:var(--text-muted); margin-top:6px;">Showing 1 day of data (${escapeHtml(points[0].date)}). Additional daily evaluations will plot the trend over time.</div>`
+        : '';
+
+      container.innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" style="width:100%; height:auto; display:block;" id="metricChartSvg">
+          ${gridSvg}
+          ${xLabelsSvg}
+          ${pathSvg}
+          ${dotsSvg}
+        </svg>
+        ${noteHtml}
+      `;
+
+      const svg = document.getElementById('metricChartSvg');
+      svg.querySelectorAll('.chart-dot').forEach(dot => {
+        dot.addEventListener('mouseenter', (e) => {
+          const idx = Number(dot.getAttribute('data-idx'));
+          const pt = coords[idx];
+          tooltip.innerHTML = `<strong>${escapeHtml(pt.date)}</strong><br>${escapeHtml(meta.format(pt.value))}`;
+          tooltip.style.display = 'block';
+          const wrapRect = container.parentElement.getBoundingClientRect();
+          const dotRect = dot.getBoundingClientRect();
+          tooltip.style.left = Math.min(wrapRect.width - 130, Math.max(8, dotRect.left - wrapRect.left - 35)) + 'px';
+          tooltip.style.top = Math.max(8, dotRect.top - wrapRect.top - 52) + 'px';
+        });
+        dot.addEventListener('mouseleave', () => {
+          tooltip.style.display = 'none';
+        });
+      });
+    }
+
+    // =========================================================================
+    // Evaluate the Market Modal & Proposed Trade Execution
+    // =========================================================================
+    let evalRunning = false;
+    let evalPollTimer = null;
+    let currentProposedTrades = [];
+    let evalShouldReloadOnClose = false;
+
+    function toggleEvalLog() {
+      const logEl = document.getElementById('evalLog');
+      const btn = document.getElementById('evalLogToggle');
+      const isOpen = logEl.classList.toggle('open');
+      btn.textContent = isOpen ? 'Hide execution log ▴' : 'Show execution log ▾';
+    }
+
+    function closeEvalModal() {
+      if (evalRunning) return;
+      if (evalPollTimer) {
+        clearInterval(evalPollTimer);
+        evalPollTimer = null;
+      }
+      document.getElementById('evalModal').classList.remove('active');
+      if (evalShouldReloadOnClose) {
+        window.location.reload();
+      }
+    }
+
     async function evaluateMarket() {
+      if (evalRunning) return;
+      evalRunning = true;
+      evalShouldReloadOnClose = false;
+      currentProposedTrades = [];
+
       const btn = document.getElementById('btnEvaluate');
       const origText = btn.innerHTML;
       btn.disabled = true;
       btn.innerHTML = '<span>⏳ Evaluating Market...</span>';
 
-      try {
-        const endpoint = window.location.pathname.endsWith('/')
-          ? window.location.pathname + 'api/evaluate'
-          : window.location.pathname + '/api/evaluate';
+      // Reset & open modal
+      document.getElementById('evalStepLabel').textContent = 'Starting market evaluation...';
+      document.getElementById('evalPercentLabel').textContent = '5%';
+      document.getElementById('evalProgressFill').style.width = '5%';
+      document.getElementById('evalLog').textContent = '';
+      document.getElementById('evalLog').classList.remove('open');
+      document.getElementById('evalLogToggle').textContent = 'Show execution log ▾';
+      document.getElementById('evalTradesSection').style.display = 'none';
+      document.getElementById('evalTradesBody').innerHTML = '';
+      document.getElementById('btnExecuteTrades').style.display = 'none';
+      document.getElementById('btnEvalCancel').disabled = true;
+      document.getElementById('btnEvalCancel').textContent = 'Close';
+      document.getElementById('evalCloseX').disabled = true;
+      document.getElementById('evalModal').classList.add('active');
 
-        const res = await fetch(endpoint, { method: 'POST' });
+      try {
+        const res = await fetch(apiUrl('api/evaluate/start'), { method: 'POST' });
+        const startData = await res.json();
+        if (!startData.success || !startData.job_id) {
+          throw new Error(startData.message || 'Failed to start evaluation job.');
+        }
+        pollEvaluationStatus(startData.job_id, btn, origText);
+      } catch (err) {
+        evalRunning = false;
+        btn.disabled = false;
+        btn.innerHTML = origText;
+        document.getElementById('evalStepLabel').textContent = 'Error starting evaluation: ' + err.message;
+        document.getElementById('evalPercentLabel').textContent = '100%';
+        document.getElementById('evalProgressFill').style.width = '100%';
+        document.getElementById('btnEvalCancel').disabled = false;
+        document.getElementById('evalCloseX').disabled = false;
+      }
+    }
+
+    function pollEvaluationStatus(jobId, btn, origText) {
+      evalPollTimer = setInterval(async () => {
+        try {
+          const res = await fetch(apiUrl('api/evaluate/status/' + encodeURIComponent(jobId)));
+          const st = await res.json();
+
+          document.getElementById('evalStepLabel').textContent = st.label || 'Evaluating...';
+          const pct = Math.min(100, Math.max(0, Number(st.percent || 0)));
+          document.getElementById('evalPercentLabel').textContent = pct + '%';
+          document.getElementById('evalProgressFill').style.width = pct + '%';
+
+          if (st.log) {
+            const logEl = document.getElementById('evalLog');
+            logEl.textContent = st.log;
+            logEl.scrollTop = logEl.scrollHeight;
+          }
+
+          if (st.done) {
+            clearInterval(evalPollTimer);
+            evalPollTimer = null;
+            evalRunning = false;
+            btn.disabled = false;
+            btn.innerHTML = origText;
+            document.getElementById('btnEvalCancel').disabled = false;
+            document.getElementById('evalCloseX').disabled = false;
+
+            if (st.success) {
+              evalShouldReloadOnClose = true;
+              currentProposedTrades = Array.isArray(st.proposed_trades) ? st.proposed_trades : [];
+              renderProposedTrades(currentProposedTrades);
+            } else {
+              document.getElementById('evalLog').classList.add('open');
+              document.getElementById('evalLogToggle').textContent = 'Hide execution log ▴';
+              document.getElementById('evalTradesSection').style.display = 'block';
+              document.getElementById('evalTradesBody').innerHTML =
+                `<div class="eval-empty-box" style="color:var(--danger); border-color:var(--danger);">Market evaluation failed. Review the execution log above for details.</div>`;
+            }
+          }
+        } catch (err) {
+          // Transient polling error; keep trying until done or user reloads
+        }
+      }, 450);
+    }
+
+    function renderProposedTrades(trades) {
+      const section = document.getElementById('evalTradesSection');
+      const body = document.getElementById('evalTradesBody');
+      const execBtn = document.getElementById('btnExecuteTrades');
+      const cancelBtn = document.getElementById('btnEvalCancel');
+      section.style.display = 'block';
+
+      if (!trades || trades.length === 0) {
+        document.getElementById('evalTradesSummary').textContent = '0 trades suggested';
+        body.innerHTML = `
+          <div class="eval-empty-box">
+            No new trades suggested right now. All actionable catalysts (&ge; 7/10) are either already held, constrained by cash/sector limits, or no new catalysts met the threshold.
+          </div>
+        `;
+        execBtn.style.display = 'none';
+        cancelBtn.textContent = 'Done & Refresh';
+        return;
+      }
+
+      const rowsHtml = trades.map((t, idx) => {
+        const isBuy = (t.action || '').toUpperCase() === 'BUY';
+        const scoreBadge = t.catalyst_score ? `<span class="score-badge score-high">${t.catalyst_score}/10</span>` : '-';
+        return `
+          <tr>
+            <td style="text-align:center;">
+              <label class="toggle-switch" title="Toggle whether to execute this trade">
+                <input type="checkbox" class="trade-toggle" data-idx="${idx}" checked onchange="updateSelectedSummary()">
+                <span class="toggle-slider"></span>
+              </label>
+            </td>
+            <td><span class="${isBuy ? 'action-buy' : 'action-sell'}">${escapeHtml(t.action)}</span></td>
+            <td><strong>${escapeHtml(t.ticker)}</strong><div style="font-size:0.72rem; color:var(--text-muted);">${escapeHtml(t.sector || '')}</div></td>
+            <td>${Number(t.shares)}</td>
+            <td>$${Number(t.price).toFixed(2)}</td>
+            <td><strong>$${Number(t.total_amount).toFixed(2)}</strong></td>
+            <td>${scoreBadge}</td>
+            <td style="font-size:0.78rem; color:var(--text-muted); max-width:240px;">${escapeHtml(t.rationale || '')}</td>
+          </tr>
+        `;
+      }).join('');
+
+      body.innerHTML = `
+        <div class="table-container" style="margin-bottom:0;">
+          <table>
+            <thead>
+              <tr>
+                <th style="text-align:center;">Execute</th>
+                <th>Action</th>
+                <th>Ticker</th>
+                <th>Shares</th>
+                <th>Est. Price</th>
+                <th>Est. Total</th>
+                <th>Score</th>
+                <th>Rationale</th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+      `;
+
+      cancelBtn.textContent = 'Skip Trades & Refresh';
+      execBtn.style.display = 'inline-flex';
+      updateSelectedSummary();
+    }
+
+    function updateSelectedSummary() {
+      const toggles = Array.from(document.querySelectorAll('.trade-toggle'));
+      let count = 0;
+      let totalAmt = 0;
+      toggles.forEach(cb => {
+        if (cb.checked) {
+          count++;
+          const t = currentProposedTrades[Number(cb.getAttribute('data-idx'))];
+          if (t) totalAmt += Number(t.total_amount || 0);
+        }
+      });
+      document.getElementById('evalTradesSummary').textContent =
+        `${count} of ${currentProposedTrades.length} selected ($${totalAmt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`;
+      const execBtn = document.getElementById('btnExecuteTrades');
+      execBtn.disabled = count === 0;
+      execBtn.textContent = `Execute Selected Trades (${count})`;
+    }
+
+    async function executeSelectedTrades() {
+      const selected = [];
+      document.querySelectorAll('.trade-toggle').forEach(cb => {
+        if (cb.checked) {
+          const t = currentProposedTrades[Number(cb.getAttribute('data-idx'))];
+          if (t) selected.push(t);
+        }
+      });
+      if (selected.length === 0) return;
+
+      const execBtn = document.getElementById('btnExecuteTrades');
+      execBtn.disabled = true;
+      execBtn.textContent = 'Executing...';
+
+      try {
+        const res = await fetch(apiUrl('api/trades/execute'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trades: selected }),
+        });
         const data = await res.json();
         if (data.success) {
-          showToast('Market evaluation completed! Reloading ledger...');
-          setTimeout(() => { window.location.reload(); }, 1200);
+          showToast(data.message || 'Trades executed successfully!');
+          evalShouldReloadOnClose = false;
+          document.getElementById('evalModal').classList.remove('active');
+          setTimeout(() => { window.location.reload(); }, 900);
         } else {
-          showToast('Evaluation failed: ' + (data.message || 'Unknown error'));
-          btn.disabled = false;
-          btn.innerHTML = origText;
+          showToast('Trade execution failed: ' + (data.message || 'Unknown error'));
+          execBtn.disabled = false;
+          updateSelectedSummary();
         }
       } catch (err) {
         showToast('Error communicating with AI Trader backend.');
-        btn.disabled = false;
-        btn.innerHTML = origText;
+        execBtn.disabled = false;
+        updateSelectedSummary();
       }
     }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        if (document.getElementById('metricModal').classList.contains('active')) {
+          closeMetricModal();
+        } else if (document.getElementById('evalModal').classList.contains('active') && !evalRunning) {
+          closeEvalModal();
+        }
+      }
+    });
 
     // Initial theme load
     const savedTheme = localStorage.getItem('ai_trader_theme') || 'system';

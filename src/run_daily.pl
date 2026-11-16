@@ -16,7 +16,10 @@ eval {
     Dotenv->load if -f '.env';
 };
 
+$| = 1;
+
 my $dry_run = 0;
+my $propose = 0;
 my $help    = 0;
 my $db_path = $ENV{DB_PATH} // "$RealBin/../data/paper_ledger.db";
 my $capital = $ENV{STARTING_CAPITAL} // 10000.00;
@@ -24,6 +27,7 @@ my $benchmark = $ENV{BENCHMARK_TICKER} // 'SPY';
 
 GetOptions(
     'dry-run' => \$dry_run,
+    'propose' => \$propose,
     'db=s'    => \$db_path,
     'help|h'  => \$help,
 ) or pod2usage(2);
@@ -99,7 +103,9 @@ system($eval_cmd) == 0 or die "[Step 4] Catalyst evaluation failed with code $?\
 
 # STEP 5: Risk Engine & Daily Reporting
 print "\n--- [Step 5/5] Risk Checks & Daily Reporting ---\n";
-my $engine_cmd = "perl -Ilocal/lib/perl5 -I$RealBin/lib $RealBin/portfolio_engine.pl" . ($dry_run ? " --dry-run" : "");
+my $engine_cmd = "perl -Ilocal/lib/perl5 -I$RealBin/lib $RealBin/portfolio_engine.pl"
+    . ($dry_run ? " --dry-run" : "")
+    . ($propose ? " --propose" : "");
 system($engine_cmd) == 0 or die "[Step 5] Portfolio engine failed with code $?\n";
 
 my $report_cmd = "perl -Ilocal/lib/perl5 -I$RealBin/lib $RealBin/generate_report.pl" . ($dry_run ? " --dry-run" : "");
