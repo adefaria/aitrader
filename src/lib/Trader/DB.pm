@@ -219,7 +219,7 @@ sub record_trade {
         $spec_version,
         $args{rationale}
     );
-    return $dbh->sqlite_last_insert_id();
+    return $dbh->sqlite_last_insert_rowid();
 }
 
 sub record_nav {
@@ -263,7 +263,7 @@ sub record_catalyst {
         $args{rationale},
         $args{status} // 'NEW'
     );
-    return $dbh->sqlite_last_insert_id();
+    return $dbh->sqlite_last_insert_rowid();
 }
 
 sub get_unscored_catalysts {
