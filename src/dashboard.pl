@@ -1177,7 +1177,11 @@ __DATA__
         % if (@$positions) {
           % for my $p (@$positions) {
             <tr>
-              <td><strong><%= $p->{ticker} %></strong></td>
+              <td>
+                <a href="https://www.marketwatch.com/investing/stock/<%= lc($p->{ticker}) %>" target="_blank" rel="noopener noreferrer" class="catalyst-link" title="Open <%= $p->{ticker} %> on MarketWatch">
+                  <strong><%= $p->{ticker} %></strong><span class="external-icon">&#x2197;</span>
+                </a>
+              </td>
               <td><%= $p->{shares} %></td>
               <td>$<%= sprintf("%.2f", $p->{cost_basis}) %></td>
               <td>$<%= sprintf("%.2f", $p->{current_price}) %></td>
