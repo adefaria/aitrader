@@ -16,6 +16,11 @@ eval {
     Dotenv->load if -f '.env';
 };
 
+# Override Mojolicious default static extra (which otherwise intercepts /favicon.ico with the default mojo icon)
+delete app->static->extra->{'favicon.ico'};
+app->static->extra->{'favicon.ico'} = "$RealBin/../public/favicon.ico";
+unshift @{app->static->paths}, "$RealBin/../public";
+
 my $db_path = $ENV{DB_PATH} // "$RealBin/../data/paper_ledger.db";
 
 helper db => sub {
@@ -191,12 +196,12 @@ __DATA__
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Trader</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0Ij4KICA8cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxNCIgZmlsbD0iIzA5MGMxMCIvPgogIDwhLS0gTGVmdCBDYW5kbGVzdGljayAoQnVsbGlzaCBHcmVlbikgLS0+CiAgPGxpbmUgeDE9IjE4IiB5MT0iMTQiIHgyPSIxOCIgeTI9IjUwIiBzdHJva2U9IiMyZWEwNDMiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+CiAgPHJlY3QgeD0iMTQiIHk9IjI0IiB3aWR0aD0iOCIgaGVpZ2h0PSIyNCIgcng9IjIiIGZpbGw9IiMyZWEwNDMiLz4KICA8IS0tIENlbnRlciBDYW5kbGVzdGljayAoVGVjaCAvIERlcHRoIEJsdWUpIC0tPgogIDxsaW5lIHgxPSIzMiIgeTE9IjEwIiB4Mj0iMzIiIHkyPSI0NCIgc3Ryb2tlPSIjMzg4YmZkIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgogIDxyZWN0IHg9IjI4IiB5PSIxOCIgd2lkdGg9IjgiIGhlaWdodD0iMjAiIHJ4PSIyIiBmaWxsPSIjMzg4YmZkIi8+CiAgPCEtLSBSaWdodCBDYW5kbGVzdGljayAoQnVsbGlzaCBHcmVlbikgLS0+CiAgPGxpbmUgeDE9IjQ2IiB5MT0iMjAiIHgyPSI0NiIgeTI9IjU0IiBzdHJva2U9IiMyZWEwNDMiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+CiAgPHJlY3QgeD0iNDIiIHk9IjI4IiB3aWR0aD0iOCIgaGVpZ2h0PSIyMCIgcng9IjIiIGZpbGw9IiMyZWEwNDMiLz4KICA8IS0tIENvbnRyYXN0IGhhbG8gYXJvdW5kIHVwd2FyZCB0cmVuZCBsaW5lIC0tPgogIDxwYXRoIGQ9Ik0xMSA0NCBMMjUgMzAgTDM3IDM2IEw1MiAxNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMDkwYzEwIiBzdHJva2Utd2lkdGg9IjcuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CiAgPGNpcmNsZSBjeD0iNTIiIGN5PSIxNCIgcj0iNi41IiBmaWxsPSIjMDkwYzEwIi8+CiAgPCEtLSBWaWJyYW50IEdyZWVuIFVwd2FyZCBHcmFwaCBMaW5lIC0tPgogIDxwYXRoIGQ9Ik0xMSA0NCBMMjUgMzAgTDM3IDM2IEw1MiAxNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMDBlNjc2IiBzdHJva2Utd2lkdGg9IjQuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CiAgPGNpcmNsZSBjeD0iNTIiIGN5PSIxNCIgcj0iNC41IiBmaWxsPSIjMDBlNjc2Ii8+Cjwvc3ZnPg==">
-  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261116b">
-  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png?v=20261116b">
-  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png?v=20261116b">
-  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=20261116b">
-  <link rel="shortcut icon" href="favicon.ico?v=20261116b">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0Ij4KICA8c3R5bGU+CiAgICAuYmcgeyBmaWxsOiAjMDkwYzEwOyBzdHJva2U6IHJnYmEoMjU1LCAyNTUsIDI1NSwgMC4xNSk7IH0KICAgIC5jYW5kbGUtZ3JlZW4geyBmaWxsOiAjMmVhMDQzOyBzdHJva2U6ICMyZWEwNDM7IH0KICAgIC5jYW5kbGUtYmx1ZSB7IGZpbGw6ICMzODhiZmQ7IHN0cm9rZTogIzM4OGJmZDsgfQogICAgLmhhbG8geyBzdHJva2U6ICMwOTBjMTA7IGZpbGw6ICMwOTBjMTA7IH0KICAgIC5ncmFwaC1saW5lIHsgc3Ryb2tlOiAjMDBlNjc2OyBmaWxsOiAjMDBlNjc2OyB9CgogICAgQG1lZGlhIChwcmVmZXJzLWNvbG9yLXNjaGVtZTogbGlnaHQpIHsKICAgICAgLmJnIHsgZmlsbDogI2Y4ZmFmYzsgc3Ryb2tlOiAjY2JkNWUxOyB9CiAgICAgIC5jYW5kbGUtZ3JlZW4geyBmaWxsOiAjODZlZmFjOyBzdHJva2U6ICMyMmM1NWU7IH0KICAgICAgLmNhbmRsZS1ibHVlIHsgZmlsbDogIzkzYzVmZDsgc3Ryb2tlOiAjM2I4MmY2OyB9CiAgICAgIC5oYWxvIHsgc3Ryb2tlOiAjZjhmYWZjOyBmaWxsOiAjZjhmYWZjOyB9CiAgICAgIC5ncmFwaC1saW5lIHsgc3Ryb2tlOiAjMTZhMzRhOyBmaWxsOiAjMTZhMzRhOyB9CiAgICB9CiAgPC9zdHlsZT4KICA8cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxNCIgY2xhc3M9ImJnIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8bGluZSB4MT0iMTgiIHkxPSIxNCIgeDI9IjE4IiB5Mj0iNTAiIGNsYXNzPSJjYW5kbGUtZ3JlZW4iIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+CiAgPHJlY3QgeD0iMTQiIHk9IjI0IiB3aWR0aD0iOCIgaGVpZ2h0PSIyNCIgcng9IjIiIGNsYXNzPSJjYW5kbGUtZ3JlZW4iLz4KICA8bGluZSB4MT0iMzIiIHkxPSIxMCIgeDI9IjMyIiB5Mj0iNDQiIGNsYXNzPSJjYW5kbGUtYmx1ZSIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KICA8cmVjdCB4PSIyOCIgeT0iMTgiIHdpZHRoPSI4IiBoZWlnaHQ9IjIwIiByeD0iMiIgY2xhc3M9ImNhbmRsZS1ibHVlIi8+CiAgPGxpbmUgeDE9IjQ2IiB5MT0iMjAiIHgyPSI0NiIgeTI9IjU0IiBjbGFzcz0iY2FuZGxlLWdyZWVuIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgogIDxyZWN0IHg9IjQyIiB5PSIyOCIgd2lkdGg9IjgiIGhlaWdodD0iMjAiIHJ4PSIyIiBjbGFzcz0iY2FuZGxlLWdyZWVuIi8+CiAgPHBhdGggZD0iTTExIDQ0IEwyNSAzMCBMMzcgMzYgTDUyIDE0IiBmaWxsPSJub25lIiBjbGFzcz0iaGFsbyIgc3Ryb2tlLXdpZHRoPSI3LjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgogIDxjaXJjbGUgY3g9IjUyIiBjeT0iMTQiIHI9IjYuNSIgY2xhc3M9ImhhbG8iLz4KICA8cGF0aCBkPSJNMTEgNDQgTDI1IDMwIEwzNyAzNiBMNTIgMTQiIGZpbGw9Im5vbmUiIGNsYXNzPSJncmFwaC1saW5lIiBzdHJva2Utd2lkdGg9IjQuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CiAgPGNpcmNsZSBjeD0iNTIiIGN5PSIxNCIgcj0iNC41IiBjbGFzcz0iZ3JhcGgtbGluZSIvPgo8L3N2Zz4=">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261116c">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png?v=20261116c">
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png?v=20261116c">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=20261116c">
+  <link rel="shortcut icon" href="favicon.ico?v=20261116c">
   <style>
     /* Theme color definitions with charcoal & black accents */
     :root[data-theme="dark"] {
@@ -497,7 +502,7 @@ __DATA__
   <!-- Header with Actions & Themes -->
   <div class="header">
     <div class="header-title-box">
-      <img src="favicon.svg?v=20261116b" alt="Logo" class="header-logo">
+      <img src="favicon.svg?v=20261116c" alt="Logo" class="header-logo">
       <h1>AI Trader</h1>
       <span class="tag-badge">Semi-Aggressive Posture</span>
       <span class="tag-badge">Spec <code><%= substr($git_commit, 0, 7) %></code></span>
