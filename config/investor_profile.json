@@ -1,0 +1,48 @@
+{
+  "investor": {
+    "name": "Andrew DeFaria",
+    "life_stage": "Entering Retirement",
+    "risk_profile": "High / Aggressive Growth with Capital Guardrails",
+    "target_horizon_days": "5 to 45 days",
+    "benchmark": "SPY",
+    "starting_capital": 10000.00
+  },
+  "asset_allocation_targets": {
+    "us_large_cap_tech": {
+      "target_pct": 45.0,
+      "min_pct": 35.0,
+      "max_pct": 60.0,
+      "candidate_tickers": ["NVDA", "MSFT", "AVGO", "AAPL"]
+    },
+    "broad_market_funds": {
+      "target_pct": 20.0,
+      "min_pct": 15.0,
+      "max_pct": 30.0,
+      "candidate_tickers": ["VOO", "QQQ", "VTI"]
+    },
+    "data_center_power": {
+      "target_pct": 15.0,
+      "min_pct": 10.0,
+      "max_pct": 20.0,
+      "candidate_tickers": ["VST", "CEG"]
+    },
+    "fixed_income_bonds": {
+      "target_pct": 10.0,
+      "min_pct": 5.0,
+      "max_pct": 20.0,
+      "candidate_tickers": ["TLT", "BND", "SGOV"]
+    },
+    "cash_reserve_floor_pct": 10.0
+  },
+  "risk_guardrails": {
+    "single_position_max_pct": 25.0,
+    "sector_max_pct": 50.0,
+    "cash_reserve_min_pct": 8.0,
+    "cash_reserve_high_conviction_min_pct": 5.0,
+    "hard_stop_loss_pct": -10.0,
+    "trailing_profit_lock_gain_pct": 12.0,
+    "trailing_profit_lock_trail_pct": 6.0,
+    "portfolio_drawdown_halt_pct": 12.0,
+    "catalyst_entry_min_score": 7
+  }
+}

@@ -64,6 +64,22 @@ my @candidates = (
         timestamp => strftime("%Y-%m-%d %H:%M:%S", localtime),
     },
     {
+        ticker    => 'MSFT',
+        theme     => 'AI Silicon & Enterprise Software',
+        headline  => 'Microsoft Azure expands enterprise Copilot adoption and secures high-margin AI subscription acceleration',
+        summary   => 'Enterprise cloud revenue jumps as Fortune 500 contracts expand, reinforcing Microsoft as a premier cash fortress compounder.',
+        source    => 'https://example.com/tech/azure-copilot-acceleration',
+        timestamp => strftime("%Y-%m-%d %H:%M:%S", localtime),
+    },
+    {
+        ticker    => 'VOO',
+        theme     => 'Broad Mutual Funds & US Core Compounders',
+        headline  => 'Vanguard S&P 500 ETF sees record institutional inflows amid solid corporate earnings resilience',
+        summary   => 'Broad market index core holdings provide robust market ballast and compounding growth alongside tech leadership.',
+        source    => 'https://example.com/etf/sp500-inflows-earnings',
+        timestamp => strftime("%Y-%m-%d %H:%M:%S", localtime),
+    },
+    {
         ticker    => 'TLT',
         theme     => 'Macro & Rate Sensitivity',
         headline  => '10-Year Treasury yield falls 18 bps following softer headline CPI print and FOMC comments',

@@ -77,14 +77,14 @@ for my $pos (@$positions) {
     my $exit_triggered = 0;
     my $exit_reason    = '';
 
-    # Hard Stop-Loss check (>= 8% loss)
-    if ($pct_change <= -8.0) {
+    # Hard Stop-Loss check (specs/00-investor-profile.md & specs/02-risk-management.md: -10.0%)
+    if ($pct_change <= -10.0) {
         $exit_triggered = 1;
-        $exit_reason = sprintf("Hard stop-loss triggered (%.2f%% <= -8.0%%)", $pct_change);
+        $exit_reason = sprintf("Hard stop-loss triggered (%.2f%% <= -10.0%%)", $pct_change);
     }
-    # Trailing Profit Lock check (Once gain >= 15%, stop trails at 7% below high-water mark)
-    elsif ($hwm >= $cost_basis * 1.15) {
-        my $trail_threshold = $hwm * 0.93;
+    # Trailing Profit Lock check (Once gain >= 12%, stop trails at 6% below high-water mark)
+    elsif ($hwm >= $cost_basis * 1.12) {
+        my $trail_threshold = $hwm * 0.94;
         if ($current_price <= $trail_threshold) {
             $exit_triggered = 1;
             $exit_reason = sprintf("Trailing profit lock triggered (\$%.2f <= \$%.2f trail threshold)", $current_price, $trail_threshold);
@@ -125,13 +125,17 @@ if (!$buys_halted) {
 
     # Sector mapping helper
     my %sector_map = (
-        'NVDA' => 'Semiconductors',
-        'AVGO' => 'Semiconductors',
-        'MRVL' => 'Semiconductors',
+        'NVDA' => 'Semiconductors & Compute',
+        'AVGO' => 'Semiconductors & Compute',
+        'MSFT' => 'Enterprise Software & AI Cloud',
+        'AAPL' => 'Consumer Tech & Ecosystem',
+        'VOO'  => 'Broad Market Index Funds',
+        'QQQ'  => 'Large-Cap Tech Index Funds',
         'CEG'  => 'Power & Grid Utilities',
         'VST'  => 'Power & Grid Utilities',
         'ETN'  => 'Electrical Equipment',
-        'TLT'  => 'Macro / Fixed Income',
+        'TLT'  => 'Macro / Fixed Income & Bonds',
+        'BND'  => 'Macro / Fixed Income & Bonds',
     );
 
     for my $cat (@$actionable) {
@@ -155,16 +159,34 @@ if (!$buys_halted) {
             next;
         }
 
-        # Sizing limits (specs/02-risk-management.md)
-        my $max_pos_cap    = $total_nav * 0.20; # 20% max single-position
-        my $min_cash_floor = ($score >= 9) ? ($total_nav * 0.05) : ($total_nav * 0.10); # 10% cash buffer (5% exception for 9+)
-        my $max_sector_cap = $total_nav * 0.40; # 40% sector cap
+        # Sizing limits (specs/00-investor-profile.md & specs/02-risk-management.md)
+        my $max_pos_cap    = $total_nav * 0.25; # 25% max single-position ($2,500 on $10k)
+        my $min_cash_floor = ($score >= 8) ? ($total_nav * 0.05) : ($total_nav * 0.08); # 8% cash buffer (5% for high conviction >= 8)
+        my $max_sector_cap = $total_nav * 0.50; # 50% sector cap
+
+        # Target sizing weights from investor profile
+        my %target_weights = (
+            'VOO'  => 0.20,
+            'QQQ'  => 0.20,
+            'VTI'  => 0.20,
+            'NVDA' => 0.15,
+            'MSFT' => 0.15,
+            'AVGO' => 0.15,
+            'AAPL' => 0.15,
+            'VST'  => 0.15,
+            'CEG'  => 0.15,
+            'TLT'  => 0.10,
+            'BND'  => 0.10,
+        );
+        my $target_weight = $target_weights{$ticker} // 0.15;
+        my $ideal_alloc   = $total_nav * $target_weight;
 
         my $current_sector_val = $sector_values{$sector} // 0.0;
         my $avail_sector_room  = $max_sector_cap - $current_sector_val;
         my $avail_cash         = $cash - $min_cash_floor;
 
-        my $target_alloc = $max_pos_cap;
+        my $target_alloc = $ideal_alloc;
+        $target_alloc = $max_pos_cap if $target_alloc > $max_pos_cap;
         $target_alloc = $avail_cash if $avail_cash < $target_alloc;
         $target_alloc = $avail_sector_room if $avail_sector_room < $target_alloc;
 
