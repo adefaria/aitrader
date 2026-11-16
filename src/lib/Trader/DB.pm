@@ -12,6 +12,7 @@ our @EXPORT_OK = qw(
     init_schema
     seed_initial_state
     fetch_market_price
+    fetch_market_indices
     get_latest_nav
     get_positions
     record_trade
@@ -132,6 +133,45 @@ sub fetch_market_price {
     }
 
     return $price;
+}
+
+sub fetch_market_indices {
+    my $ua = Mojo::UserAgent->new;
+    $ua->transactor->name('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    $ua->inactivity_timeout(4);
+    $ua->connect_timeout(2);
+
+    my @indices = (
+        { name => 'DOW',    symbol => '^DJI' },
+        { name => 'S&P 500',symbol => '^GSPC' },
+        { name => 'NASDAQ', symbol => '^IXIC' },
+    );
+
+    my @results;
+    for my $item (@indices) {
+        my $sym = $item->{symbol};
+        my $price = 0.0;
+        my $change = 0.0;
+        my $pct = 0.0;
+        eval {
+            my $tx = $ua->get("https://query1.finance.yahoo.com/v8/finance/chart/$sym?interval=1d&range=2d");
+            if ($tx->result->is_success) {
+                my $meta = $tx->result->json->{chart}{result}[0]{meta};
+                $price = $meta->{regularMarketPrice} // 0.0;
+                my $prev = $meta->{chartPreviousClose} // $price;
+                $change = $price - $prev;
+                $pct = ($prev && $prev > 0) ? (($change / $prev) * 100) : 0.0;
+            }
+        };
+        push @results, {
+            name   => $item->{name},
+            symbol => $item->{symbol},
+            price  => $price,
+            change => $change,
+            pct    => $pct,
+        };
+    }
+    return \@results;
 }
 
 sub seed_initial_state {
