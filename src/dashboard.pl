@@ -219,7 +219,7 @@ post '/api/evaluate/start' => sub ($c) {
     if ($pid == 0) {
         # Child worker process
         my $cmd = "perl -Ilocal/lib/perl5 -I$RealBin/lib $RealBin/run_daily.pl --propose 2>&1";
-        if (open my $fh, '-|', $cmd) {
+        if (open my $fh, '-|:encoding(UTF-8)', $cmd) {
             while (my $line = <$fh>) {
                 if ($line =~ /^__PROPOSED_TRADES_JSON__:(.*)$/) {
                     my $json_str = $1;

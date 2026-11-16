@@ -71,24 +71,30 @@ if (!$api_key) {
     die "[Step 2] FATAL: GEMINI_API_KEY is not defined in environment or .env!\n";
 }
 
-my $ua = Mojo::UserAgent->new;
-$ua->inactivity_timeout(15);
-$ua->connect_timeout(10);
-my $model = $ENV{GEMINI_MODEL} // 'gemini-2.5-flash';
-my $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$api_key";
+if ($dry_run) {
+    my $ua = Mojo::UserAgent->new;
+    $ua->inactivity_timeout(15);
+    $ua->connect_timeout(10);
+    my $model = $ENV{GEMINI_MODEL} // 'gemini-2.5-flash';
+    my $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$api_key";
 
-my $gemini_tx = $ua->post($endpoint => json => {
-    contents => [
-        { parts => [ { text => 'Antigravity Layer 2 connection test: reply with status ok.' } ] }
-    ]
-});
+    my $gemini_tx = $ua->post($endpoint => json => {
+        contents => [
+            { parts => [ { text => 'Antigravity Layer 2 connection test: reply with status ok.' } ] }
+        ]
+    });
 
-if ($gemini_tx->result->is_success) {
-    my $reply = $gemini_tx->result->json->{candidates}[0]{content}{parts}[0]{text} // '';
-    $reply =~ s/^\s+|\s+$//g;
-    printf "[Step 2] Gemini REST API connectivity verified (%s): %s\n", $model, $reply;
+    if ($gemini_tx->result->is_success) {
+        my $reply = $gemini_tx->result->json->{candidates}[0]{content}{parts}[0]{text} // '';
+        $reply =~ s/^\s+|\s+$//g;
+        printf "[Step 2] Gemini REST API connectivity verified (%s): %s\n", $model, $reply;
+    } elsif ($gemini_tx->result->code == 429) {
+        warn "[Step 2] WARNING: Gemini API daily quota exceeded (429). Continuing with cached/scored catalysts.\n";
+    } else {
+        die sprintf("[Step 2] FATAL: Gemini API request failed: %s\n", $gemini_tx->result->body);
+    }
 } else {
-    die sprintf("[Step 2] FATAL: Gemini API request failed: %s\n", $gemini_tx->result->body);
+    print "[Step 2] GEMINI_API_KEY configured (skipping redundant ping to preserve API quota).\n";
 }
 
 # STEP 3: News Ingestion Stage

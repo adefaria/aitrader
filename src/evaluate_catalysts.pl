@@ -101,6 +101,10 @@ Summary: $event->{summary}
   my $tx = $ua->post ($endpoint => json => $payload);
 
   if (!$tx->result->is_success) {
+    if ($tx->result->code == 429) {
+      warn "[evaluate_catalysts] WARNING: Gemini API daily quota exceeded (429). Skipping remaining unscored catalysts.\n";
+      last;
+    }
     warn sprintf ("[evaluate_catalysts] API call failed for %s (%d): %s\n",
       $event->{ticker}, $tx->result->code, $tx->result->body);
     next;
