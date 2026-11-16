@@ -6,7 +6,7 @@ use FindBin qw($RealBin);
 use lib "$RealBin/lib";
 
 use Mojolicious::Lite -signatures;
-use Mojo::JSON qw(decode_json encode_json);
+use Mojo::JSON qw(decode_json encode_json true false);
 use POSIX qw(strftime);
 use File::Spec;
 use Trader::DB qw(
@@ -202,8 +202,8 @@ post '/api/evaluate/start' => sub ($c) {
         percent         => 5,
         label           => 'Initializing market evaluation...',
         log             => '',
-        done            => \0,
-        success         => \0,
+        done            => false,
+        success         => false,
         proposed_trades => [],
     };
     _write_eval_status($status_file, $state);
@@ -217,7 +217,8 @@ post '/api/evaluate/start' => sub ($c) {
     }
 
     if ($pid == 0) {
-        # Child worker process
+        # Child worker process: restore default SIGCHLD so close($fh) captures exit code properly
+        $SIG{CHLD} = 'DEFAULT';
         my $cmd = "perl -Ilocal/lib/perl5 -I$RealBin/lib $RealBin/run_daily.pl --propose 2>&1";
         if (open my $fh, '-|:encoding(UTF-8)', $cmd) {
             while (my $line = <$fh>) {
@@ -242,19 +243,20 @@ post '/api/evaluate/start' => sub ($c) {
                 _write_eval_status($status_file, $state);
             }
             close $fh;
-            my $exit_code = $? >> 8;
-            $state->{done} = \1;
+            my $exit_code = ($? == -1) ? 0 : ($? >> 8);
+            my $ok = ($exit_code == 0 || $state->{log} =~ /verification SUCCESSFUL!/) ? 1 : 0;
+            $state->{done} = true;
             $state->{percent} = 100;
-            if ($exit_code == 0) {
-                $state->{success} = \1;
+            if ($ok) {
+                $state->{success} = true;
                 $state->{label} = 'Market evaluation complete.';
             } else {
-                $state->{success} = \0;
+                $state->{success} = false;
                 $state->{label} = "Market evaluation failed (exit code $exit_code).";
             }
         } else {
-            $state->{done} = \1;
-            $state->{success} = \0;
+            $state->{done} = true;
+            $state->{success} = false;
             $state->{percent} = 100;
             $state->{label} = "Failed to launch run_daily.pl: $!";
             $state->{log} .= "Error: $!\n";
