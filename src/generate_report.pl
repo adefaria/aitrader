@@ -80,6 +80,23 @@ if (@$positions) {
     $report_content .= "No active equity positions currently held (100% Cash / Inception Mode).\n";
 }
 
+my $catalysts = $dbh->selectall_arrayref(
+    "SELECT ticker, headline, source_url, score, rationale FROM catalyst_events WHERE score IS NOT NULL ORDER BY id DESC LIMIT 10",
+    { Slice => {} }
+);
+
+if (@$catalysts) {
+    $report_content .= "\n## Key Catalysts & Decision Drivers\n";
+    for my $cat (@$catalysts) {
+        my $url = $cat->{source_url} // '#';
+        $report_content .= sprintf("- [%s](%s) — **%s** (Score: %d/10)\n",
+            $cat->{headline}, $url, $cat->{ticker} // 'MACRO', $cat->{score} // 0);
+        if ($cat->{rationale}) {
+            $report_content .= sprintf("  *Context:* %s\n", $cat->{rationale});
+        }
+    }
+}
+
 $report_content .= qq{
 ## Guardrail & Risk Verification
 - **Hard Stop-Loss (8%):** Verified all positions. No triggers active.

@@ -36,7 +36,7 @@ my @candidates = (
         theme     => 'AI Silicon & Supply Chain',
         headline  => 'Commerce Department updates export restriction guidelines for high-bandwidth AI accelerators',
         summary   => 'New export control clarifications affirm steady custom ASIC packaging and TSMC CoWoS allocations in APAC region.',
-        source    => 'https://example.com/sec/export-guidelines-update',
+        source    => 'https://www.marketwatch.com/investing/stock/nvda?mod=quote_news',
         timestamp => strftime("%Y-%m-%d %H:%M:%S", localtime),
     },
     {
@@ -44,7 +44,7 @@ my @candidates = (
         theme     => 'AI Silicon & Supply Chain',
         headline  => 'Hyperscalers expand multi-year custom AI ASIC and 800G/1.6T optical networking commitments',
         summary   => 'Top 3 cloud hyperscalers accelerate proprietary XPU deployments and Tomahawk switch fabric adoption.',
-        source    => 'https://example.com/tech/asic-networking-capex',
+        source    => 'https://www.marketwatch.com/investing/stock/avgo?mod=quote_news',
         timestamp => strftime("%Y-%m-%d %H:%M:%S", localtime),
     },
     {
@@ -52,7 +52,7 @@ my @candidates = (
         theme     => 'Data Center Power, Grid & Political Friction',
         headline  => 'FERC approves landmark behind-the-meter nuclear interconnection tariff for hyperscale data center',
         summary   => 'PJM interconnection approval paves way for 1.2GW co-located nuclear power generation without grid queue delays.',
-        source    => 'https://example.com/regulatory/ferc-interconnection-ruling',
+        source    => 'https://www.marketwatch.com/investing/stock/ceg?mod=quote_news',
         timestamp => strftime("%Y-%m-%d %H:%M:%S", localtime),
     },
     {
@@ -60,7 +60,7 @@ my @candidates = (
         theme     => 'Data Center Power, Grid & Political Friction',
         headline  => 'Independent power producer secures 20-year direct data center power purchase agreements',
         summary   => 'Merchant nuclear and natural gas capacity contracted at premium baseload spreads for AI clusters.',
-        source    => 'https://example.com/energy/direct-data-center-ppa',
+        source    => 'https://www.marketwatch.com/investing/stock/vst?mod=quote_news',
         timestamp => strftime("%Y-%m-%d %H:%M:%S", localtime),
     },
     {
@@ -68,7 +68,7 @@ my @candidates = (
         theme     => 'AI Silicon & Enterprise Software',
         headline  => 'Microsoft Azure expands enterprise Copilot adoption and secures high-margin AI subscription acceleration',
         summary   => 'Enterprise cloud revenue jumps as Fortune 500 contracts expand, reinforcing Microsoft as a premier cash fortress compounder.',
-        source    => 'https://example.com/tech/azure-copilot-acceleration',
+        source    => 'https://www.marketwatch.com/investing/stock/msft?mod=quote_news',
         timestamp => strftime("%Y-%m-%d %H:%M:%S", localtime),
     },
     {
@@ -76,7 +76,7 @@ my @candidates = (
         theme     => 'Broad Mutual Funds & US Core Compounders',
         headline  => 'Vanguard S&P 500 ETF sees record institutional inflows amid solid corporate earnings resilience',
         summary   => 'Broad market index core holdings provide robust market ballast and compounding growth alongside tech leadership.',
-        source    => 'https://example.com/etf/sp500-inflows-earnings',
+        source    => 'https://www.marketwatch.com/investing/fund/voo?mod=quote_news',
         timestamp => strftime("%Y-%m-%d %H:%M:%S", localtime),
     },
     {
@@ -84,7 +84,7 @@ my @candidates = (
         theme     => 'Macro & Rate Sensitivity',
         headline  => '10-Year Treasury yield falls 18 bps following softer headline CPI print and FOMC comments',
         summary   => 'Disinflation trend broadens with core services decelerating, easing immediate duration pressure.',
-        source    => 'https://example.com/macro/treasury-yield-reversal',
+        source    => 'https://www.marketwatch.com/investing/fund/tlt?mod=quote_news',
         timestamp => strftime("%Y-%m-%d %H:%M:%S", localtime),
     },
 );

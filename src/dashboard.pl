@@ -456,6 +456,28 @@ __DATA__
     .score-low { background: rgba(248, 81, 73, 0.15); color: var(--danger); border: 1px solid var(--danger); }
     .action-buy { color: var(--success); font-weight: 800; }
     .action-sell { color: var(--danger); font-weight: 800; }
+    .catalyst-link {
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 600;
+      transition: color 0.15s ease;
+      display: inline-block;
+    }
+    .catalyst-link:hover {
+      color: var(--accent-primary);
+      text-decoration: underline;
+    }
+    .catalyst-link .external-icon {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-left: 4px;
+      vertical-align: middle;
+      opacity: 0.8;
+    }
+    .catalyst-link:hover .external-icon {
+      color: var(--accent-primary);
+      opacity: 1;
+    }
 
     /* Toast Notification */
     #toast {
@@ -651,7 +673,15 @@ __DATA__
               </td>
               <td style="white-space: nowrap;"><%= $c->{theme} // '-' %></td>
               <td>
-                <div style="font-weight: 600;"><%= $c->{headline} %></div>
+                % if ($c->{source_url}) {
+                  <div>
+                    <a href="<%= $c->{source_url} %>" target="_blank" rel="noopener noreferrer" class="catalyst-link" title="Open source article in new tab">
+                      <%= $c->{headline} %><span class="external-icon">&#x2197;</span>
+                    </a>
+                  </div>
+                % } else {
+                  <div style="font-weight: 600;"><%= $c->{headline} %></div>
+                % }
                 % if ($c->{rationale}) {
                   <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 4px;"><%= $c->{rationale} %></div>
                 % }
