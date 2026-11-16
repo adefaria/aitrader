@@ -712,9 +712,27 @@ __DATA__
       border-color: var(--accent-primary);
       box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
     }
-    .card-title { font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
-    .card-chart-hint { font-size: 0.85rem; opacity: 0.65; transition: opacity 0.15s ease; }
-    .clickable-card:hover .card-chart-hint { opacity: 1; color: var(--accent-primary); }
+    .card-title { font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .card-chart-hint {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: none;
+      letter-spacing: 0;
+      color: var(--text-muted);
+      background: var(--card-inner);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s ease;
+    }
+    .clickable-card:hover .card-chart-hint {
+      color: var(--accent-primary);
+      border-color: var(--accent-primary);
+      background: var(--accent-hover);
+    }
     .card-value { font-size: 1.7rem; font-weight: 800; font-family: monospace; }
     .card-sub { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
 
@@ -1082,34 +1100,34 @@ __DATA__
 
   <!-- Primary NAV & Benchmark Cards -->
   <div class="grid">
-    <div class="card clickable-card" onclick="openMetricModal('total_nav')" title="Click to view Total Portfolio NAV over time">
+    <div class="card clickable-card" role="button" tabindex="0" onclick="openMetricModal('total_nav')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openMetricModal('total_nav');}" title="Click to open Total Portfolio NAV chart dialog">
       <div class="card-title">
         <span>Total Portfolio NAV</span>
-        <span class="card-chart-hint">📈</span>
+        <span class="card-chart-hint">📈 Chart</span>
       </div>
       <div class="card-value">$<%= sprintf("%.2f", $nav->{total_nav}) %></div>
       <div class="card-sub">Baseline Capital: $10,000.00</div>
     </div>
-    <div class="card clickable-card" onclick="openMetricModal('cash')" title="Click to view Cash Reserve Floor over time">
+    <div class="card clickable-card" role="button" tabindex="0" onclick="openMetricModal('cash')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openMetricModal('cash');}" title="Click to open Cash Reserve Floor chart dialog">
       <div class="card-title">
         <span>Cash Reserve Floor</span>
-        <span class="card-chart-hint">📈</span>
+        <span class="card-chart-hint">📈 Chart</span>
       </div>
       <div class="card-value">$<%= sprintf("%.2f", $nav->{cash}) %></div>
       <div class="card-sub"><%= sprintf("%.1f", ($nav->{cash} / ($nav->{total_nav} || 1)) * 100) %>% Allocation (Min: 10%)</div>
     </div>
-    <div class="card clickable-card" onclick="openMetricModal('spy_price')" title="Click to view SPY Price over time">
+    <div class="card clickable-card" role="button" tabindex="0" onclick="openMetricModal('spy_price')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openMetricModal('spy_price');}" title="Click to open SPY Price chart dialog">
       <div class="card-title">
         <span>SPY Inception Price</span>
-        <span class="card-chart-hint">📈</span>
+        <span class="card-chart-hint">📈 Chart</span>
       </div>
       <div class="card-value">$<%= sprintf("%.2f", $nav->{spy_price}) %></div>
       <div class="card-sub">Primary S&amp;P 500 Benchmark</div>
     </div>
-    <div class="card clickable-card" onclick="openMetricModal('alpha')" title="Click to view Alpha (vs SPY) over time">
+    <div class="card clickable-card" role="button" tabindex="0" onclick="openMetricModal('alpha')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openMetricModal('alpha');}" title="Click to open Alpha (vs SPY) chart dialog">
       <div class="card-title">
         <span>Alpha (vs SPY)</span>
-        <span class="card-chart-hint">📈</span>
+        <span class="card-chart-hint">📈 Chart</span>
       </div>
       <div class="card-value <%= $nav->{alpha} >= 0 ? 'positive' : 'negative' %>">
         <%= sprintf("%+.2f", $nav->{alpha} * 100) %>%
