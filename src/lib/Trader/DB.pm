@@ -114,8 +114,8 @@ sub fetch_market_price {
 
     my $ua = Mojo::UserAgent->new;
     $ua->transactor->name('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    $ua->inactivity_timeout(10);
-    $ua->connect_timeout(5);
+    $ua->inactivity_timeout(3);
+    $ua->connect_timeout(2);
 
     my $price;
     for my $host ('query1.finance.yahoo.com', 'query2.finance.yahoo.com') {

@@ -19,6 +19,17 @@ helper db => sub {
     return get_dbh($db_path);
 };
 
+my %PRICE_CACHE;
+helper cached_price => sub ($c, $ticker, $fallback = 0.0) {
+    my $now = time;
+    if ($PRICE_CACHE{$ticker} && ($now - $PRICE_CACHE{$ticker}{ts} < 60)) {
+        return $PRICE_CACHE{$ticker}{price};
+    }
+    my $price = fetch_market_price($ticker) // $fallback;
+    $PRICE_CACHE{$ticker} = { price => $price, ts => $now } if $price;
+    return $price || $fallback;
+};
+
 get '/' => sub ($c) {
     my $dbh = $c->db;
     my $nav = get_latest_nav($dbh) // {
@@ -35,7 +46,7 @@ get '/' => sub ($c) {
 
     my $positions = get_positions($dbh);
     for my $p (@$positions) {
-        $p->{current_price} = fetch_market_price($p->{ticker}) // $p->{cost_basis};
+        $p->{current_price} = $c->cached_price($p->{ticker}, $p->{cost_basis});
         $p->{return_pct} = (($p->{current_price} - $p->{cost_basis}) / $p->{cost_basis}) * 100;
     }
 
