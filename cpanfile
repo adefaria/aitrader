@@ -6,4 +6,3 @@ requires 'XML::Feed';
 requires 'Dotenv';
 requires 'Getopt::Long';
 requires 'Pod::Usage';
-
