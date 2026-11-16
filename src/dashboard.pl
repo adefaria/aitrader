@@ -313,40 +313,82 @@ __DATA__
     .btn-evaluate:hover { opacity: 0.9; }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-    /* Theme Dropdown Control (matching ABS/defaria app style) */
-    .theme-control-wrapper {
+    /* Icon-only Theme Dropdown Menu (matching jobhunt / defaria apps) */
+    .theme-dropdown {
+      position: relative;
+      display: inline-block;
+    }
+    .btn-theme.icon-only {
+      padding: 0;
+      width: 38px;
+      height: 38px;
       display: inline-flex;
       align-items: center;
-      position: relative;
-    }
-    .theme-dropdown {
+      justify-content: center;
+      font-size: 1.15rem;
+      line-height: 1;
       background: var(--card-inner);
       border: 1px solid var(--border);
       color: var(--text);
       border-radius: 6px;
-      padding: 8px 12px;
-      font-size: 0.85rem;
-      font-weight: 600;
       cursor: pointer;
-      outline: none;
-      transition: border-color 0.15s ease, background-color 0.15s ease;
-      appearance: none;
-      -webkit-appearance: none;
-      padding-right: 28px;
+      box-shadow: var(--shadow);
+      transition: all 0.15s ease;
     }
-    .theme-dropdown:hover {
+    .btn-theme.icon-only:hover {
+      background: var(--accent-hover);
       border-color: var(--accent-primary);
     }
-    .theme-dropdown option {
-      background: var(--card-bg);
-      color: var(--text);
-    }
-    .theme-arrow {
+    .theme-menu {
       position: absolute;
-      right: 10px;
-      pointer-events: none;
-      font-size: 0.7rem;
-      color: var(--text-muted);
+      top: calc(100% + 6px);
+      right: 0;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      padding: 6px;
+      min-width: 135px;
+      z-index: 1000;
+      display: none;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .theme-menu.active {
+      display: flex;
+    }
+    .theme-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text);
+      background: transparent;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.1s ease;
+      width: 100%;
+    }
+    .theme-menu-item:hover {
+      background: var(--accent-hover);
+      color: var(--accent-primary);
+    }
+    .theme-menu-item.active {
+      background: var(--accent-hover);
+      color: var(--accent-primary);
+      font-weight: 700;
+    }
+    .theme-menu-item .check {
+      margin-left: auto;
+      font-size: 0.8rem;
+      opacity: 0;
+    }
+    .theme-menu-item.active .check {
+      opacity: 1;
     }
 
     /* Primary Stats Grid */
@@ -446,14 +488,25 @@ __DATA__
         <span>⚡ Evaluate the Market</span>
       </button>
 
-      <!-- Theme Dropdown: System / Light / Dark -->
-      <div class="theme-control-wrapper">
-        <select id="themeSelect" class="theme-dropdown" title="Select UI Theme" onchange="applyTheme(this.value)">
-          <option value="system">💻 System</option>
-          <option value="light">☀️ Light</option>
-          <option value="dark">🌙 Dark</option>
-        </select>
-        <span class="theme-arrow">▼</span>
+      <!-- Theme Dropdown (Icon Only with Dropdown) -->
+      <div class="theme-dropdown">
+        <button id="btnThemeToggle" class="btn-theme icon-only" title="Theme Selection" type="button" aria-haspopup="true" aria-expanded="false">
+          <span id="themeIcon">💻</span>
+        </button>
+        <div id="themeMenu" class="theme-menu">
+          <button type="button" class="theme-menu-item" data-theme-val="light" onclick="selectThemeMode('light')">
+            <span>☀️</span> Light
+            <span class="check">✓</span>
+          </button>
+          <button type="button" class="theme-menu-item" data-theme-val="dark" onclick="selectThemeMode('dark')">
+            <span>🌙</span> Dark
+            <span class="check">✓</span>
+          </button>
+          <button type="button" class="theme-menu-item" data-theme-val="system" onclick="selectThemeMode('system')">
+            <span>💻</span> System
+            <span class="check">✓</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -639,31 +692,83 @@ __DATA__
   <div id="toast"></div>
 
   <script>
-    // Theme Management (System / Light / Dark)
-    function applyTheme(preference) {
-      const select = document.getElementById('themeSelect');
-      if (select) select.value = preference;
+    // Theme Management (System / Light / Dark) matching other DeFaria web apps
+    let currentThemeMode = 'system';
 
-      if (preference === 'system') {
-        const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
-      } else {
-        document.documentElement.setAttribute('data-theme', preference);
+    function getSystemTheme() {
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+
+    function setThemeMode(mode, save = true) {
+      currentThemeMode = mode;
+      let effectiveTheme = mode;
+      if (mode === 'system') {
+        effectiveTheme = getSystemTheme();
       }
-      localStorage.setItem('ai_trader_theme', preference);
+      if (save) {
+        try { localStorage.setItem('ai_trader_theme', mode); } catch (e) {}
+      }
+
+      document.documentElement.setAttribute('data-theme', effectiveTheme);
+
+      const iconEl = document.getElementById('themeIcon');
+      const btn = document.getElementById('btnThemeToggle');
+      if (iconEl && btn) {
+        if (mode === 'system') {
+          iconEl.textContent = '💻';
+          btn.title = `Theme: System (${effectiveTheme}) - Click to change`;
+        } else if (mode === 'light') {
+          iconEl.textContent = '☀️';
+          btn.title = 'Theme: Light - Click to change';
+        } else {
+          iconEl.textContent = '🌙';
+          btn.title = 'Theme: Dark - Click to change';
+        }
+      }
+
+      document.querySelectorAll('.theme-menu-item').forEach(item => {
+        if (item.getAttribute('data-theme-val') === mode) {
+          item.classList.add('active');
+        } else {
+          item.classList.remove('active');
+        }
+      });
     }
 
-    function initTheme() {
-      const saved = localStorage.getItem('ai_trader_theme') || 'system';
-      applyTheme(saved);
+    function selectThemeMode(mode) {
+      setThemeMode(mode, true);
+      closeThemeMenu();
     }
 
-    // Dynamic listener for OS dark mode changes when set to System
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
-      if ((localStorage.getItem('ai_trader_theme') || 'system') === 'system') {
-        document.documentElement.setAttribute('data-theme', e.matches ? 'dark' : 'light');
+    function toggleThemeMenu() {
+      const menu = document.getElementById('themeMenu');
+      if (menu) menu.classList.toggle('active');
+    }
+
+    function closeThemeMenu() {
+      const menu = document.getElementById('themeMenu');
+      if (menu) menu.classList.remove('active');
+    }
+
+    document.getElementById('btnThemeToggle').addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleThemeMenu();
+    });
+
+    document.addEventListener('click', (e) => {
+      const dropdown = document.querySelector('.theme-dropdown');
+      if (dropdown && !dropdown.contains(e.target)) {
+        closeThemeMenu();
       }
     });
+
+    if (window.matchMedia) {
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+        if (currentThemeMode === 'system') {
+          setThemeMode('system', false);
+        }
+      });
+    }
 
     // Evaluate the Market trigger
     function showToast(msg) {
@@ -701,7 +806,9 @@ __DATA__
       }
     }
 
-    initTheme();
+    // Initial theme load
+    const savedTheme = localStorage.getItem('ai_trader_theme') || 'system';
+    setThemeMode(savedTheme, false);
   </script>
 
 </body>
