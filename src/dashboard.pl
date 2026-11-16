@@ -78,8 +78,23 @@ get '/favicon.svg' => sub ($c) {
 };
 
 get '/favicon.ico' => sub ($c) {
-    $c->res->headers->content_type('image/svg+xml');
-    $c->reply->file("$RealBin/../public/favicon.svg");
+    $c->res->headers->content_type('image/x-icon');
+    $c->reply->file("$RealBin/../public/favicon.ico");
+};
+
+get '/favicon-32x32.png' => sub ($c) {
+    $c->res->headers->content_type('image/png');
+    $c->reply->file("$RealBin/../public/favicon-32x32.png");
+};
+
+get '/favicon-16x16.png' => sub ($c) {
+    $c->res->headers->content_type('image/png');
+    $c->reply->file("$RealBin/../public/favicon-16x16.png");
+};
+
+get '/apple-touch-icon.png' => sub ($c) {
+    $c->res->headers->content_type('image/png');
+    $c->reply->file("$RealBin/../public/apple-touch-icon.png");
 };
 
 get '/' => sub ($c) {
@@ -176,8 +191,11 @@ __DATA__
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Trader</title>
-  <link rel="icon" type="image/svg+xml" href="favicon.svg">
-  <link rel="alternate icon" href="favicon.ico">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=3">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png?v=3">
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png?v=3">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=3">
+  <link rel="shortcut icon" href="favicon.ico?v=3">
   <style>
     /* Theme color definitions with charcoal & black accents */
     :root[data-theme="dark"] {
