@@ -191,11 +191,12 @@ __DATA__
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Trader</title>
-  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=3">
-  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png?v=3">
-  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png?v=3">
-  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=3">
-  <link rel="shortcut icon" href="favicon.ico?v=3">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0Ij4KICA8cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxNCIgZmlsbD0iIzA5MGMxMCIvPgogIDwhLS0gTGVmdCBDYW5kbGVzdGljayAoQnVsbGlzaCBHcmVlbikgLS0+CiAgPGxpbmUgeDE9IjE4IiB5MT0iMTQiIHgyPSIxOCIgeTI9IjUwIiBzdHJva2U9IiMyZWEwNDMiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+CiAgPHJlY3QgeD0iMTQiIHk9IjI0IiB3aWR0aD0iOCIgaGVpZ2h0PSIyNCIgcng9IjIiIGZpbGw9IiMyZWEwNDMiLz4KICA8IS0tIENlbnRlciBDYW5kbGVzdGljayAoVGVjaCAvIERlcHRoIEJsdWUpIC0tPgogIDxsaW5lIHgxPSIzMiIgeTE9IjEwIiB4Mj0iMzIiIHkyPSI0NCIgc3Ryb2tlPSIjMzg4YmZkIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgogIDxyZWN0IHg9IjI4IiB5PSIxOCIgd2lkdGg9IjgiIGhlaWdodD0iMjAiIHJ4PSIyIiBmaWxsPSIjMzg4YmZkIi8+CiAgPCEtLSBSaWdodCBDYW5kbGVzdGljayAoQnVsbGlzaCBHcmVlbikgLS0+CiAgPGxpbmUgeDE9IjQ2IiB5MT0iMjAiIHgyPSI0NiIgeTI9IjU0IiBzdHJva2U9IiMyZWEwNDMiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+CiAgPHJlY3QgeD0iNDIiIHk9IjI4IiB3aWR0aD0iOCIgaGVpZ2h0PSIyMCIgcng9IjIiIGZpbGw9IiMyZWEwNDMiLz4KICA8IS0tIENvbnRyYXN0IGhhbG8gYXJvdW5kIHVwd2FyZCB0cmVuZCBsaW5lIC0tPgogIDxwYXRoIGQ9Ik0xMSA0NCBMMjUgMzAgTDM3IDM2IEw1MiAxNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMDkwYzEwIiBzdHJva2Utd2lkdGg9IjcuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CiAgPGNpcmNsZSBjeD0iNTIiIGN5PSIxNCIgcj0iNi41IiBmaWxsPSIjMDkwYzEwIi8+CiAgPCEtLSBWaWJyYW50IEdyZWVuIFVwd2FyZCBHcmFwaCBMaW5lIC0tPgogIDxwYXRoIGQ9Ik0xMSA0NCBMMjUgMzAgTDM3IDM2IEw1MiAxNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMDBlNjc2IiBzdHJva2Utd2lkdGg9IjQuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CiAgPGNpcmNsZSBjeD0iNTIiIGN5PSIxNCIgcj0iNC41IiBmaWxsPSIjMDBlNjc2Ii8+Cjwvc3ZnPg==">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261116b">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png?v=20261116b">
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png?v=20261116b">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=20261116b">
+  <link rel="shortcut icon" href="favicon.ico?v=20261116b">
   <style>
     /* Theme color definitions with charcoal & black accents */
     :root[data-theme="dark"] {
@@ -496,7 +497,7 @@ __DATA__
   <!-- Header with Actions & Themes -->
   <div class="header">
     <div class="header-title-box">
-      <img src="favicon.svg" alt="Logo" class="header-logo">
+      <img src="favicon.svg?v=20261116b" alt="Logo" class="header-logo">
       <h1>AI Trader</h1>
       <span class="tag-badge">Semi-Aggressive Posture</span>
       <span class="tag-badge">Spec <code><%= substr($git_commit, 0, 7) %></code></span>
