@@ -414,7 +414,7 @@ post '/api/trades/execute' => sub ($c) {
     my $hwm = $nav_info->{high_water_mark} // $new_total_nav;
     $hwm = $new_total_nav if $new_total_nav > $hwm;
     my $new_drawdown = ($hwm > 0) ? (($hwm - $new_total_nav) / $hwm) : 0.0;
-    my $starting_capital = $ENV{STARTING_CAPITAL} // 10000.00;
+    my $starting_capital = $ENV{STARTING_CAPITAL} // 167876.21;
     my $portfolio_return = ($new_total_nav - $starting_capital) / $starting_capital;
     my $benchmark = $ENV{BENCHMARK_TICKER} // 'SPY';
     my $spy_price = fetch_market_price($benchmark) // $nav_info->{spy_price};
@@ -451,7 +451,7 @@ post '/api/trades/execute' => sub ($c) {
 };
 
 post '/api/evaluate' => sub ($c) {
-    my $cmd = "perl -Ilocal/lib/perl5 -I$RealBin/lib $RealBin/run_daily.pl 2>&1";
+    my $cmd = "perl -Ilocal/lib/perl5 -I$RealBin/lib $RealBin/run_daily.pl --propose 2>&1";
     my $output = `$cmd`;
     my $exit_code = $? >> 8;
 
@@ -460,7 +460,7 @@ post '/api/evaluate' => sub ($c) {
         $INDICES_CACHE = undef;
         $c->render(json => {
             success => 1,
-            message => 'Market evaluation and catalyst execution completed successfully.',
+            message => 'Market evaluation and advisor trade recommendations completed successfully.',
             output  => $output,
         });
     } else {
@@ -1069,7 +1069,7 @@ __DATA__
     <div class="header-title-box">
       <img src="favicon.svg?v=20261116c" alt="Logo" class="header-logo">
       <h1>AI Trader</h1>
-      <span class="tag-badge">Semi-Aggressive Posture</span>
+      <span class="tag-badge">Advisor Recommendations Mode (with Jon)</span>
       <span class="tag-badge">Spec <code><%= substr($git_commit, 0, 7) %></code></span>
     </div>
     <div class="header-actions">
@@ -1108,7 +1108,7 @@ __DATA__
         <span class="card-chart-hint">📈 Chart</span>
       </div>
       <div class="card-value">$<%= sprintf("%.2f", $nav->{total_nav}) %></div>
-      <div class="card-sub">Baseline Capital: $10,000.00</div>
+      <div class="card-sub">Invested Capital: $167,876.21 ($159,132.64 Eq + $8,743.57 Cash)</div>
     </div>
     <div class="card clickable-card" role="button" tabindex="0" onclick="openMetricModal('cash')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openMetricModal('cash');}" title="Click to open Cash Reserve Floor chart dialog">
       <div class="card-title">
@@ -1141,16 +1141,16 @@ __DATA__
   <!-- Posture & Trigger Architecture -->
   <div class="posture-banner">
     <div class="posture-item">
-      <strong>Trading Cadence:</strong> Automated daily at morning/post-close + on-demand manual evaluation
+      <strong>Execution Mode:</strong> Recommendations Only (Review with Financial Advisor Jon; real-world fills logged manually)
     </div>
     <div class="posture-item">
       <strong>Entry Trigger:</strong> Actionable catalysts scoring &ge; 7/10 (AI Silicon, Power Grid, Macro Duration)
     </div>
     <div class="posture-item">
-      <strong>Exit Triggers:</strong> Hard Stop-Loss (-8.0%) &bull; Trailing Profit Lock (7.0% trail once &ge; +15.0% gain)
+      <strong>Exit Triggers:</strong> Hard Stop-Loss (-10.0%) &bull; Trailing Profit Lock (6.0% trail once &ge; +12.0% gain)
     </div>
     <div class="posture-item">
-      <strong>Asset Universe:</strong> Equities, Sector ETFs, Fixed Income/Treasuries (<code>TLT</code>), Energy &amp; Thematic
+      <strong>Asset Universe:</strong> Core US Equities, Index/Sector ETFs (<code>QQQ</code>, <code>XLI</code>, <code>SPY</code>, <code>VTI</code>), Energy &amp; Thematic
     </div>
   </div>
 
@@ -1334,10 +1334,13 @@ __DATA__
   <div id="evalModal" class="modal-backdrop">
     <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="evalModalTitle">
       <div class="modal-header">
-        <div id="evalModalTitle" class="modal-title">⚡ Market Evaluation &amp; Trade Proposals</div>
+        <div id="evalModalTitle" class="modal-title">⚡ Market Evaluation &amp; Advisor Recommendations</div>
         <button type="button" id="evalCloseX" class="modal-close" onclick="closeEvalModal()" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body">
+        <div style="background: var(--card-inner); border: 1px solid var(--border); border-left: 3px solid var(--accent-primary); border-radius: 6px; padding: 10px 14px; margin-bottom: 14px; font-size: 0.82rem; color: var(--text-muted);">
+          <strong style="color: var(--text);">Advisor-Only Mode:</strong> Evaluations never execute trades automatically. Review any recommended trades below with <strong style="color: var(--text);">Jon</strong> (your financial advisor). Only record a trade here if it has actually been executed in the real world.
+        </div>
         <div class="eval-progress-header">
           <span id="evalStepLabel">Starting market evaluation...</span>
           <span id="evalPercentLabel">0%</span>
@@ -1351,7 +1354,7 @@ __DATA__
 
         <div id="evalTradesSection" style="display: none;">
           <div class="suggested-trades-header">
-            <span>Suggested Trades</span>
+            <span>Recommended Trades (For Review with Jon)</span>
             <span id="evalTradesSummary" style="font-size: 0.8rem; font-weight: 500; color: var(--text-muted);"></span>
           </div>
           <div id="evalTradesBody"></div>
@@ -1359,7 +1362,7 @@ __DATA__
       </div>
       <div id="evalModalFooter" class="modal-footer">
         <button type="button" id="btnEvalCancel" class="btn btn-secondary" onclick="closeEvalModal()" disabled>Close</button>
-        <button type="button" id="btnExecuteTrades" class="btn btn-primary" onclick="executeSelectedTrades()" style="display: none;">Execute Selected Trades</button>
+        <button type="button" id="btnExecuteTrades" class="btn btn-primary" onclick="executeSelectedTrades()" style="display: none;">Record Selected Real-World Trades</button>
       </div>
     </div>
   </div>
@@ -1474,8 +1477,8 @@ __DATA__
         title: 'Total Portfolio NAV Over Time',
         extract: r => Number(r.total_nav || 0),
         format: v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-        baseline: 10000,
-        baselineLabel: 'Baseline ($10,000)',
+        baseline: 167876.21,
+        baselineLabel: 'Invested Capital ($167,876.21)',
         color: '#388bfd',
       },
       cash: {
@@ -1814,8 +1817,8 @@ __DATA__
         return `
           <tr>
             <td style="text-align:center;">
-              <label class="toggle-switch" title="Toggle whether to execute this trade">
-                <input type="checkbox" class="trade-toggle" data-idx="${idx}" checked onchange="updateSelectedSummary()">
+              <label class="toggle-switch" title="Toggle only if you executed this trade in the real world with Jon">
+                <input type="checkbox" class="trade-toggle" data-idx="${idx}" onchange="updateSelectedSummary()">
                 <span class="toggle-slider"></span>
               </label>
             </td>
@@ -1835,14 +1838,14 @@ __DATA__
           <table>
             <thead>
               <tr>
-                <th style="text-align:center;">Execute</th>
-                <th>Action</th>
+                <th style="text-align:center;">Traded?</th>
+                <th>Recommendation</th>
                 <th>Ticker</th>
                 <th>Shares</th>
                 <th>Est. Price</th>
                 <th>Est. Total</th>
                 <th>Score</th>
-                <th>Rationale</th>
+                <th>Rationale for Jon</th>
               </tr>
             </thead>
             <tbody>${rowsHtml}</tbody>
@@ -1850,7 +1853,7 @@ __DATA__
         </div>
       `;
 
-      cancelBtn.textContent = 'Skip Trades & Refresh';
+      cancelBtn.textContent = 'Close (Keep Recommendations Only)';
       execBtn.style.display = 'inline-flex';
       updateSelectedSummary();
     }
@@ -1867,10 +1870,10 @@ __DATA__
         }
       });
       document.getElementById('evalTradesSummary').textContent =
-        `${count} of ${currentProposedTrades.length} selected ($${totalAmt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`;
+        `${currentProposedTrades.length} recommended (${count} marked as executed: $${totalAmt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`;
       const execBtn = document.getElementById('btnExecuteTrades');
       execBtn.disabled = count === 0;
-      execBtn.textContent = `Execute Selected Trades (${count})`;
+      execBtn.textContent = `Record Executed Trades (${count})`;
     }
 
     async function executeSelectedTrades() {

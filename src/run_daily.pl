@@ -22,8 +22,9 @@ my $dry_run = 0;
 my $propose = 0;
 my $help    = 0;
 my $db_path = $ENV{DB_PATH} // "$RealBin/../data/paper_ledger.db";
-my $capital = $ENV{STARTING_CAPITAL} // 10000.00;
+my $capital = $ENV{STARTING_CAPITAL} // 167876.21;
 my $benchmark = $ENV{BENCHMARK_TICKER} // 'SPY';
+my $exec_mode = $ENV{EXECUTION_MODE} // 'ADVISOR_BRIEF';
 
 GetOptions(
     'dry-run' => \$dry_run,
@@ -34,9 +35,12 @@ GetOptions(
 
 pod2usage(1) if $help;
 
+# Enforce advisor-only recommendations mode unless explicitly overridden
+$propose = 1 if uc($exec_mode) eq 'ADVISOR_BRIEF';
+
 print "========================================================\n";
 print " AI TRADER — Daily Pipeline Orchestrator (Perl Layer 3) \n";
-print " Mode: " . ($dry_run ? "DRY-RUN VERIFICATION" : "PRODUCTION SIMULATION") . "\n";
+print " Mode: " . ($dry_run ? "DRY-RUN VERIFICATION" : ($propose ? "ADVISOR RECOMMENDATIONS ONLY" : "PRODUCTION SIMULATION")) . "\n";
 print " Git Commit: " . get_git_commit() . "\n";
 print " Timestamp:  " . strftime("%Y-%m-%d %H:%M:%S", localtime) . "\n";
 print "========================================================\n\n";

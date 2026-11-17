@@ -24,6 +24,7 @@ my $propose = 0;
 my $help    = 0;
 my $db_path = $ENV{DB_PATH} // "$RealBin/../data/paper_ledger.db";
 my $benchmark = $ENV{BENCHMARK_TICKER} // 'SPY';
+my $exec_mode = $ENV{EXECUTION_MODE} // 'ADVISOR_BRIEF';
 
 GetOptions(
     'dry-run' => \$dry_run,
@@ -33,6 +34,9 @@ GetOptions(
 ) or pod2usage(2);
 
 pod2usage(1) if $help;
+
+# In ADVISOR_BRIEF mode, trades are strictly proposed as recommendations for Jon (never auto-executed)
+$propose = 1 if uc($exec_mode) eq 'ADVISOR_BRIEF';
 
 print "[portfolio_engine] Evaluating risk management & portfolio execution constraints...\n";
 
@@ -148,7 +152,14 @@ if (!$buys_halted) {
         'MSFT' => 'Enterprise Software & AI Cloud',
         'AAPL' => 'Consumer Tech & Ecosystem',
         'VOO'  => 'Broad Market Index Funds',
+        'SPY'  => 'Broad Market Index Funds',
+        'VTI'  => 'Broad Market Index Funds',
         'QQQ'  => 'Large-Cap Tech Index Funds',
+        'XLI'  => 'Industrial Sector ETF',
+        'DIS'  => 'Communication Services & Media',
+        'HD'   => 'Consumer Cyclical & Retail',
+        'SBUX' => 'Consumer Cyclical & Retail',
+        'UNH'  => 'Healthcare & Managed Care',
         'CEG'  => 'Power & Grid Utilities',
         'VST'  => 'Power & Grid Utilities',
         'ETN'  => 'Electrical Equipment',
@@ -270,7 +281,7 @@ my $hwm = $nav_info->{high_water_mark} // $total_nav;
 $hwm = $new_total_nav if $new_total_nav > $hwm;
 my $new_drawdown = ($hwm > 0) ? (($hwm - $new_total_nav) / $hwm) : 0.0;
 
-my $starting_capital = $ENV{STARTING_CAPITAL} // 10000.00;
+my $starting_capital = $ENV{STARTING_CAPITAL} // 167876.21;
 my $portfolio_return = ($new_total_nav - $starting_capital) / $starting_capital;
 
 my $spy_price = fetch_market_price($benchmark) // $nav_info->{spy_price};
