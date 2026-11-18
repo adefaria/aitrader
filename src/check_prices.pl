@@ -1,6 +1,9 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
+use utf8;
+binmode(STDOUT, ':encoding(UTF-8)');
+binmode(STDERR, ':encoding(UTF-8)');
 use local::lib 'local';
 use FindBin qw($RealBin);
 use lib "$RealBin/lib";
@@ -375,7 +378,7 @@ sub dispatch_notification {
     my $n = scalar(@$alert_list);
     return if $n <= 0;
 
-    my $title = sprintf("AI Trader: %d Price Alert%s (±%.1f%%)",
+    my $title = sprintf("AI Trader: %d Price Alert%s (+/-%.1f%%)",
         $n, ($n > 1 ? 's' : ''), $threshold);
 
     my $dialog_text = sprintf(
@@ -385,13 +388,14 @@ sub dispatch_notification {
 
     my @spoken_parts;
     for my $a (@$alert_list) {
-        my $arrow = ($a->{day_pct} >= 0) ? '▲' : '▼';
+        my $color = ($a->{day_pct} >= 0) ? '#2ea043' : '#d93025';
+        my $dir_label = ($a->{day_pct} >= 0) ? 'UP' : 'DOWN';
         my $tag   = ($a->{asset_type} eq 'INDEX') ? 'Index' : 'Holding';
         my $lbl   = pango_escape($a->{label});
         my $rsn   = pango_escape($a->{trigger_reason});
         $dialog_text .= sprintf(
-            "• %s <b>%s</b> (%s): <b>\$%.2f</b> — %s\n",
-            $arrow, $lbl, $tag, $a->{price}, $rsn
+            "&#8226; <b>%s</b> (%s): <b>\$%.2f</b> &#8212; <span foreground=\"%s\"><b>%s %s</b></span>\n",
+            $lbl, $tag, $a->{price}, $color, $dir_label, $rsn
         );
 
         if (@spoken_parts < 4) {
