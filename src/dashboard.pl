@@ -198,14 +198,15 @@ get '/' => sub ($c) {
     }
 
     $c->stash(
-        nav             => $nav,
-        positions       => $positions,
-        trades          => $trades,
-        catalysts       => $catalysts,
-        indices         => $indices,
-        last_run        => $last_run,
-        proposed_trades => $proposed_trades,
-        git_commit      => get_git_commit(),
+        nav                  => $nav,
+        positions            => $positions,
+        trades               => $trades,
+        catalysts            => $catalysts,
+        indices              => $indices,
+        last_run             => $last_run,
+        proposed_trades      => $proposed_trades,
+        proposed_trades_json => encode_json($proposed_trades // []),
+        git_commit           => get_git_commit(),
     );
     $c->render(template => 'index');
 };
@@ -2250,7 +2251,7 @@ __DATA__
     // =========================================================================
     let evalRunning = false;
     let evalPollTimer = null;
-    let currentProposedTrades = <%== encode_json($proposed_trades // []) %>;
+    let currentProposedTrades = <%== $proposed_trades_json %>;
     let evalShouldReloadOnClose = false;
 
     function updateLastRunRecsLink() {
