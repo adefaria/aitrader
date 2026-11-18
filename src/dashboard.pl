@@ -10,9 +10,9 @@ use Mojo::JSON qw(decode_json encode_json true false);
 use POSIX qw(strftime);
 use File::Spec;
 use Trader::DB qw(
-    get_dbh get_latest_nav get_positions fetch_market_price
+    get_dbh get_latest_nav get_positions fetch_market_price fetch_market_quote
     fetch_market_indices get_git_commit record_trade record_nav
-    upsert_position close_position
+    upsert_position close_position get_last_run get_run_logs
 );
 
 eval {
@@ -32,14 +32,28 @@ helper db => sub {
 };
 
 my %PRICE_CACHE;
-helper cached_price => sub ($c, $ticker, $fallback = 0.0) {
+helper cached_quote => sub ($c, $ticker, $fallback = 0.0) {
     my $now = time;
     if ($PRICE_CACHE{$ticker} && ($now - $PRICE_CACHE{$ticker}{ts} < 60)) {
-        return $PRICE_CACHE{$ticker}{price};
+        return $PRICE_CACHE{$ticker}{quote};
     }
-    my $price = fetch_market_price($ticker) // $fallback;
-    $PRICE_CACHE{$ticker} = { price => $price, ts => $now } if $price;
-    return $price || $fallback;
+    my $quote = fetch_market_quote($ticker);
+    if ($quote && $quote->{price}) {
+        $PRICE_CACHE{$ticker} = { quote => $quote, price => $quote->{price}, ts => $now };
+        return $quote;
+    }
+    return {
+        ticker         => $ticker,
+        price          => $fallback,
+        previous_close => $fallback,
+        change         => 0.0,
+        pct            => 0.0,
+    };
+};
+
+helper cached_price => sub ($c, $ticker, $fallback = 0.0) {
+    my $quote = $c->cached_quote($ticker, $fallback);
+    return $quote->{price} || $fallback;
 };
 
 my ($INDICES_CACHE, $INDICES_CACHE_TIME);
@@ -122,9 +136,12 @@ get '/' => sub ($c) {
 
     my $positions = get_positions($dbh);
     for my $p (@$positions) {
-        $p->{current_price} = $c->cached_price($p->{ticker}, $p->{cost_basis});
-        $p->{return_pct} = (($p->{current_price} - $p->{cost_basis}) / $p->{cost_basis}) * 100;
-        $p->{market_val} = $p->{shares} * $p->{current_price};
+        my $q = $c->cached_quote($p->{ticker}, $p->{cost_basis});
+        $p->{current_price}  = $q->{price};
+        $p->{day_change}     = $q->{change} // 0.0;
+        $p->{day_change_pct} = $q->{pct} // 0.0;
+        $p->{return_pct}     = (($p->{current_price} - $p->{cost_basis}) / $p->{cost_basis}) * 100;
+        $p->{market_val}     = $p->{shares} * $p->{current_price};
     }
 
     my $trades = $dbh->selectall_arrayref(
@@ -137,6 +154,8 @@ get '/' => sub ($c) {
         { Slice => {} }
     );
 
+    my $last_run = get_last_run($dbh);
+
     $dbh->disconnect;
 
     my $indices = $c->cached_indices();
@@ -147,6 +166,7 @@ get '/' => sub ($c) {
         trades     => $trades,
         catalysts  => $catalysts,
         indices    => $indices,
+        last_run   => $last_run,
         git_commit => get_git_commit(),
     );
     $c->render(template => 'index');
@@ -156,6 +176,7 @@ get '/api/status' => sub ($c) {
     my $dbh = $c->db;
     my $nav = get_latest_nav($dbh);
     my $positions = get_positions($dbh);
+    my $last_run = get_last_run($dbh);
     $dbh->disconnect;
     my $indices = $c->cached_indices();
 
@@ -163,6 +184,7 @@ get '/api/status' => sub ($c) {
         nav        => $nav,
         positions  => $positions,
         indices    => $indices,
+        last_run   => $last_run,
         git_commit => get_git_commit(),
     });
 };
@@ -219,7 +241,7 @@ post '/api/evaluate/start' => sub ($c) {
     if ($pid == 0) {
         # Child worker process: restore default SIGCHLD so close($fh) captures exit code properly
         $SIG{CHLD} = 'DEFAULT';
-        my $cmd = "perl -Ilocal/lib/perl5 -I$RealBin/lib $RealBin/run_daily.pl --propose 2>&1";
+        my $cmd = "perl -Ilocal/lib/perl5 -I$RealBin/lib $RealBin/run_daily.pl --propose --trigger=web 2>&1";
         if (open my $fh, '-|:encoding(UTF-8)', $cmd) {
             while (my $line = <$fh>) {
                 if ($line =~ /^__PROPOSED_TRADES_JSON__:(.*)$/) {
@@ -472,6 +494,163 @@ post '/api/evaluate' => sub ($c) {
     }
 };
 
+sub _discover_log_files ($logs_dir) {
+    my %files;
+    return \%files unless -d $logs_dir;
+    opendir(my $dh, $logs_dir) or return \%files;
+    my @cands = grep { /^cron\.log/ && -f "$logs_dir/$_" && -r "$logs_dir/$_" } readdir($dh);
+    closedir($dh);
+
+    for my $f (@cands) {
+        $files{$f} = "$logs_dir/$f";
+    }
+    return \%files;
+}
+
+sub _read_log_file ($filepath) {
+    return '' unless defined $filepath && -f $filepath && -r $filepath;
+    if ($filepath =~ /\.gz$/) {
+        my $out = `gzip -dc \Q$filepath\E 2>/dev/null`;
+        return $out // '';
+    }
+    local $/;
+    open my $fh, '<:encoding(UTF-8)', $filepath or return '';
+    my $content = <$fh>;
+    close $fh;
+    return $content // '';
+}
+
+sub _parse_cron_log_runs ($raw, $filename) {
+    $raw //= '';
+    $raw =~ s/^\s+|\s+$//g;
+    return [] unless length $raw;
+
+    my @chunks = split /(?=^={40,}\r?\n\[?\d{4}-\d{2}-\d{2})/m, $raw;
+    if (@chunks <= 1 && $raw =~ /^={40,}/m) {
+        @chunks = grep { /\S/ } split /(?=^={40,}\r?\n(?:\[\d{4}|\s*AI TRADER))/m, $raw;
+    }
+
+    my @runs;
+    for my $chunk (@chunks) {
+        my @lines = split /\r?\n/, $chunk;
+        my $ts = '-';
+        my $trigger = 'cron';
+        for my $l (@lines) {
+            if ($l =~ /\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)\]/) {
+                $ts = substr($1, 0, 16);
+            }
+            if ($l =~ /Local Time:\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/) {
+                $ts = $1 if $ts eq '-';
+            }
+            if ($l =~ /trigger=([a-zA-Z0-9_]+)/) {
+                $trigger = lc($1);
+            }
+        }
+
+        my @metrics;
+        for my $line (@lines) {
+            my $t = $line;
+            $t =~ s/^\s+|\s+$//g;
+            next if $t eq '' || $t =~ /^={10,}/ || $t =~ /^-{3,}/;
+
+            if ($t =~ /^\[(INDEX|HOLDING)\]\s+(.+?)\s*\|\s*Price:\s*\$\s*([0-9.]+)\s*\|\s*Day:\s*([+\-0-9.]+%)\s*\(\s*([+\-0-9.]+)\s*\)\s*\|\s*Hourly:\s*([+\-0-9.]+%)(.*)$/) {
+                my ($kind, $sym, $price, $day_pct, $day_chg, $hr_pct, $tail) = ($1, $2, $3, $4, $5, $6, $7 // '');
+                $sym =~ s/\s+$//;
+                my $is_alert = ($tail =~ /ALERT/i) ? 1 : 0;
+                my $badge = $is_alert ? 'Alert' : ($kind eq 'INDEX' ? 'Index' : 'Holding');
+                my $tone  = $is_alert ? 'warn'  : ($day_pct =~ /^\+/ ? 'ok' : ($day_pct =~ /^-/ ? 'bad' : 'info'));
+                push @metrics, {
+                    badge  => $badge,
+                    metric => sprintf("%s: %s (Day: %s / \$%s, Hourly: %s)", ($kind eq 'INDEX' ? 'Index' : 'Holding'), $sym, $day_pct, $day_chg, $hr_pct),
+                    value  => sprintf("\$%.2f%s", $price, ($is_alert ? ' [ALERT]' : '')),
+                    tone   => $tone,
+                };
+            } elsif ($t =~ /^Total NAV:\s*\$([0-9.]+)\s*\|\s*Holdings:\s*\$([0-9.]+)\s*\|\s*Cash:\s*\$([0-9.]+)\s*\|\s*ROI:\s*([+\-0-9.]+%)\s*\|\s*Alpha:\s*([+\-0-9.]+%)/) {
+                my ($nav, $hold, $cash, $roi, $alpha) = ($1, $2, $3, $4, $5);
+                push @metrics, {
+                    badge  => 'NAV',
+                    metric => sprintf("Portfolio Valuation (Holdings: \$%s, Cash: \$%s, Alpha: %s)", $hold, $cash, $alpha),
+                    value  => sprintf("\$%s (%s ROI)", $nav, $roi),
+                    tone   => ($roi =~ /^-/ ? 'bad' : 'ok'),
+                };
+            } elsif ($t =~ /^\[check_prices\]\s*(.+)$/) {
+                my $msg = $1;
+                my $is_disp = ($msg =~ /Dispatched/i) ? 1 : 0;
+                push @metrics, {
+                    badge  => $is_disp ? 'Notify' : 'Monitor',
+                    metric => $msg,
+                    value  => $is_disp ? 'ALERT SENT' : 'OK',
+                    tone   => $is_disp ? 'warn' : 'muted',
+                };
+            }
+        }
+
+        if (@metrics) {
+            push @runs, {
+                timestamp => $ts,
+                trigger   => $trigger,
+                file      => $filename,
+                metrics   => \@metrics,
+                raw       => $chunk,
+            };
+        }
+    }
+
+    @runs = reverse @runs;
+    return \@runs;
+}
+
+my $logs_handler = sub ($c) {
+    my $logs_dir = "$RealBin/../logs";
+    my $log_files = _discover_log_files($logs_dir);
+    my @sorted_names = sort {
+        return -1 if $a eq 'cron.log';
+        return  1 if $b eq 'cron.log';
+        my ($na) = ($a =~ /cron\.log\.(\d+)/);
+        my ($nb) = ($b =~ /cron\.log\.(\d+)/);
+        ($na // 0) <=> ($nb // 0);
+    } keys %$log_files;
+
+    my $selected_file = $c->param('file') // 'cron.log';
+    if ($selected_file ne 'ALL' && !exists $log_files->{$selected_file}) {
+        $selected_file = exists $log_files->{'cron.log'} ? 'cron.log' : ($sorted_names[0] // 'cron.log');
+    }
+
+    my @displayed_runs;
+    my $raw_combined = '';
+    if ($selected_file eq 'ALL') {
+        for my $fn (@sorted_names) {
+            my $content = _read_log_file($log_files->{$fn});
+            if (length $content) {
+                $raw_combined .= "=== $fn ===\n" . $content . "\n\n";
+                my $parsed = _parse_cron_log_runs($content, $fn);
+                push @displayed_runs, @$parsed;
+            }
+        }
+    } elsif (exists $log_files->{$selected_file}) {
+        $raw_combined = _read_log_file($log_files->{$selected_file});
+        my $parsed = _parse_cron_log_runs($raw_combined, $selected_file);
+        @displayed_runs = @$parsed;
+    }
+
+    my $dbh = $c->db;
+    my $run_history = get_run_logs($dbh, 100);
+    $dbh->disconnect;
+
+    $c->stash(
+        log_file_names => \@sorted_names,
+        selected_file  => $selected_file,
+        displayed_runs => \@displayed_runs,
+        raw_combined   => $raw_combined,
+        run_history    => $run_history,
+        git_commit     => get_git_commit(),
+    );
+    $c->render(template => 'logs');
+};
+
+get '/logs'     => $logs_handler;
+get '/logs.php' => $logs_handler;
+
 app->start;
 
 __DATA__
@@ -587,7 +766,23 @@ __DATA__
       flex-wrap: wrap;
       gap: 16px;
     }
-    .header-title-box { display: flex; align-items: center; gap: 12px; }
+    .header-title-box { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .brand-block { display: flex; flex-direction: column; gap: 4px; }
+    .last-run {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin-left: 44px;
+    }
+    .last-run-link {
+      color: var(--accent-primary);
+      font-weight: 700;
+      text-decoration: none;
+      transition: color 0.15s ease;
+    }
+    .last-run-link:hover {
+      color: var(--accent);
+      text-decoration: underline;
+    }
     .header-logo { width: 32px; height: 32px; vertical-align: middle; }
     .header h1 { font-size: 1.75rem; font-weight: 800; letter-spacing: -0.5px; }
     .tag-badge {
@@ -1066,11 +1261,20 @@ __DATA__
 
   <!-- Header with Actions & Themes -->
   <div class="header">
-    <div class="header-title-box">
-      <img src="favicon.svg?v=20261116c" alt="Logo" class="header-logo">
-      <h1>AI Trader</h1>
-      <span class="tag-badge">Advisor Recommendations Mode (with Jon)</span>
-      <span class="tag-badge">Spec <code><%= substr($git_commit, 0, 7) %></code></span>
+    <div class="brand-block">
+      <div class="header-title-box">
+        <img src="favicon.svg?v=20261116c" alt="Logo" class="header-logo">
+        <h1>AI Trader</h1>
+        <span class="tag-badge">Advisor Recommendations Mode (with Jon)</span>
+        <span class="tag-badge">Spec <code><%= substr($git_commit, 0, 7) %></code></span>
+      </div>
+      <div class="last-run" id="lastRun">
+        % if ($last_run) {
+          Last run: <a href="logs.php" class="last-run-link" title="View Hourly Monitor &amp; Evaluation Logs (<%= $last_run->{timestamp} %>)"><%= $last_run->{display} %></a> (<%= $last_run->{trigger_label} %>)<% if ($last_run->{short_summary}) { %> &middot; <%= $last_run->{short_summary} %><% } %>
+        % } else {
+          Last run: <a href="logs.php" class="last-run-link" title="View Hourly Monitor &amp; Evaluation Logs">never</a>
+        % }
+      </div>
     </div>
     <div class="header-actions">
       <button id="btnEvaluate" class="btn btn-evaluate" onclick="evaluateMarket()">
@@ -1167,8 +1371,9 @@ __DATA__
           <th>Shares</th>
           <th>Cost Basis</th>
           <th>Market Price</th>
+          <th>Day Change</th>
           <th>Market Value</th>
-          <th>Return</th>
+          <th>Total Return</th>
           <th>Sector / Asset Class</th>
           <th>High-Water Mark</th>
         </tr>
@@ -1185,6 +1390,9 @@ __DATA__
               <td><%= $p->{shares} %></td>
               <td>$<%= sprintf("%.2f", $p->{cost_basis}) %></td>
               <td>$<%= sprintf("%.2f", $p->{current_price}) %></td>
+              <td class="<%= ($p->{day_change_pct} // 0) >= 0 ? 'positive' : 'negative' %>">
+                <%= sprintf("%+.2f (%+.2f%%)", $p->{day_change} // 0, $p->{day_change_pct} // 0) %>
+              </td>
               <td><strong>$<%= sprintf("%.2f", $p->{market_val}) %></strong></td>
               <td class="<%= $p->{return_pct} >= 0 ? 'positive' : 'negative' %>"><%= sprintf("%+.2f", $p->{return_pct}) %>%</td>
               <td><%= $p->{sector} // 'General' %></td>
@@ -1193,7 +1401,7 @@ __DATA__
           % }
         % } else {
           <tr>
-            <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 24px;">
+            <td colspan="9" style="text-align: center; color: var(--text-muted); padding: 24px;">
               No open positions. 100% Cash Allocation.
             </td>
           </tr>
@@ -1929,5 +2137,498 @@ __DATA__
     setThemeMode(savedTheme, false);
   </script>
 
+</body>
+</html>
+
+@@ logs.html.ep
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Trader Logs — Hourly Price Monitor &amp; Market Evaluations</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=20261116c">
+  <link rel="shortcut icon" href="favicon.ico?v=20261116c">
+  <script>
+    (function() {
+      const setting = localStorage.getItem('ai_trader_theme') || localStorage.getItem('user_theme_override') || 'system';
+      let effective = setting;
+      if (setting === 'system') {
+        effective = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+      document.documentElement.setAttribute('data-theme', effective);
+    })();
+  </script>
+  <style>
+    :root, [data-theme="dark"] {
+      --bg: #0b0e14;
+      --card: #121721;
+      --card-inner: #181f2c;
+      --border: #262f40;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --accent-charcoal: #1e2430;
+      --accent-charcoal-hover: #2a3242;
+      --accent-primary: #3b82f6;
+      --green: #2ea043;
+      --red: #f85149;
+      --gold: #d29922;
+      --accent: #58a6ff;
+      --table-hover: rgba(255, 255, 255, 0.025);
+      --badge-bg: #1e2636;
+      --log-bg: #080b10;
+      --log-text: #e2e8f0;
+    }
+
+    [data-theme="light"] {
+      --bg: #f4f6f9;
+      --card: #ffffff;
+      --card-inner: #f8fafc;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --text-muted: #59636e;
+      --accent-charcoal: #24292f;
+      --accent-charcoal-hover: #32383f;
+      --accent-primary: #2563eb;
+      --green: #1a7f37;
+      --red: #cf222e;
+      --gold: #9a6700;
+      --accent: #0969da;
+      --table-hover: rgba(0, 0, 0, 0.025);
+      --badge-bg: #eaeef2;
+      --log-bg: #f8fafc;
+      --log-text: #0f172a;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 20px 24px 48px;
+      max-width: 1440px;
+      margin: 0 auto;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+    .brand-block { display: flex; flex-direction: column; gap: 4px; }
+    .header-title-box { display: flex; align-items: center; gap: 12px; }
+    .header-logo { width: 32px; height: 32px; vertical-align: middle; }
+    .header h1 { font-size: 1.75rem; font-weight: 800; letter-spacing: -0.5px; }
+    .subtitle {
+      font-size: 0.84rem;
+      color: var(--text-muted);
+      margin-left: 44px;
+    }
+    .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border-radius: 6px;
+      font-size: 0.84rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      border: 1px solid var(--border);
+      text-decoration: none;
+      color: var(--text);
+      background: var(--card);
+    }
+    .btn:hover { background: var(--card-inner); border-color: var(--text-muted); }
+    .btn-primary {
+      background: var(--accent-primary);
+      color: #ffffff;
+      border-color: var(--accent-primary);
+    }
+    .btn-primary:hover { opacity: 0.92; color: #ffffff; }
+
+    .theme-dropdown { position: relative; display: inline-block; }
+    .btn-theme {
+      background: var(--card);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .btn-theme.icon-only {
+      padding: 0;
+      width: 34px;
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.05rem;
+    }
+    .theme-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);
+      padding: 4px;
+      min-width: 135px;
+      z-index: 1000;
+      display: none;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .theme-menu.active { display: flex; }
+    .theme-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      font-size: 0.84rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      background: transparent;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      text-align: left;
+      width: 100%;
+    }
+    .theme-menu-item:hover { background: var(--card-inner); color: var(--text); }
+    .theme-menu-item.active {
+      background: var(--badge-bg);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .theme-menu-item .check { margin-left: auto; font-size: 0.8rem; opacity: 0; }
+    .theme-menu-item.active .check { opacity: 1; }
+
+    .section-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 14px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .section-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .section-title code {
+      font-family: monospace;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      background: var(--card-inner);
+      border: 1px solid var(--border);
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    select.form-select {
+      background: var(--card-inner);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 0.84rem;
+    }
+
+    .table-responsive { overflow-x: auto; max-width: 100%; }
+    table.data-table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.85rem;
+    }
+    table.data-table th {
+      background: var(--card-inner);
+      padding: 10px 12px;
+      font-weight: 600;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+    }
+    table.data-table td {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    table.data-table tr:hover td { background: var(--table-hover); }
+
+    .ts-cell {
+      white-space: nowrap;
+      color: var(--text-muted);
+      font-family: monospace;
+      font-size: 0.82rem;
+    }
+    .metric-cell {
+      color: var(--text);
+      font-weight: 500;
+    }
+    .val-cell {
+      text-align: right;
+      font-family: monospace;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .val-ok { color: var(--green); }
+    .val-warn { color: var(--gold); }
+    .val-bad { color: var(--red); }
+    .val-info { color: var(--accent); }
+    .val-muted { color: var(--text-muted); }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 5px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .badge-ok { background: rgba(46, 160, 67, 0.15); color: var(--green); border: 1px solid rgba(46, 160, 67, 0.35); }
+    .badge-warn { background: rgba(210, 153, 34, 0.15); color: var(--gold); border: 1px solid rgba(210, 153, 34, 0.35); }
+    .badge-bad { background: rgba(248, 81, 73, 0.15); color: var(--red); border: 1px solid rgba(248, 81, 73, 0.35); }
+    .badge-info { background: rgba(59, 130, 246, 0.15); color: var(--accent); border: 1px solid rgba(59, 130, 246, 0.35); }
+    .badge-muted { background: var(--badge-bg); color: var(--text-muted); border: 1px solid var(--border); }
+
+    details.raw-log-details {
+      margin-top: 16px;
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+    }
+    details.raw-log-details summary {
+      cursor: pointer;
+      font-size: 0.84rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      user-select: none;
+    }
+    details.raw-log-details pre {
+      margin-top: 10px;
+      background: var(--log-bg);
+      color: var(--log-text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      font-family: monospace;
+      font-size: 0.8rem;
+      overflow-x: auto;
+      max-height: 480px;
+      overflow-y: auto;
+      line-height: 1.45;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="brand-block">
+      <div class="header-title-box">
+        <img src="favicon.svg?v=20261116c" alt="Logo" class="header-logo">
+        <h1>AI Trader Logs</h1>
+      </div>
+      <div class="subtitle">Automated Hourly Trading-Hours Price Monitor, ±2% Alerts &amp; Market Evaluation History</div>
+    </div>
+    <div class="header-actions">
+      <div class="theme-dropdown">
+        <button id="btnThemeToggle" class="btn-theme icon-only" title="Theme Selection" type="button">
+          <span id="themeIcon">💻</span>
+        </button>
+        <div id="themeMenu" class="theme-menu">
+          <button type="button" class="theme-menu-item" data-theme-val="light" onclick="selectThemeMode('light')">
+            <span>☀️</span> Light <span class="check">✓</span>
+          </button>
+          <button type="button" class="theme-menu-item" data-theme-val="dark" onclick="selectThemeMode('dark')">
+            <span>🌙</span> Dark <span class="check">✓</span>
+          </button>
+          <button type="button" class="theme-menu-item" data-theme-val="system" onclick="selectThemeMode('system')">
+            <span>💻</span> System <span class="check">✓</span>
+          </button>
+        </div>
+      </div>
+      <a href="./" class="btn btn-primary">← Control Panel</a>
+      <a href="/jobhunt/" class="btn">💼 JobHunt</a>
+      <a href="/reachout/" class="btn">✉️ Reachout</a>
+    </div>
+  </div>
+
+  <!-- Section 1: Hourly Cron & Monitor Log -->
+  <div class="section-card">
+    <div class="section-header">
+      <div class="section-title">
+        AI Trader Hourly Monitor Log
+        <code>/opt/aitrader/logs/<%= $selected_file eq 'ALL' ? 'cron.log*' : $selected_file %></code>
+      </div>
+      <form method="get" action="logs.php" style="display: flex; align-items: center; gap: 8px;">
+        <label for="fileSelect" style="font-size: 0.82rem; color: var(--text-muted);">Log File:</label>
+        <select name="file" id="fileSelect" class="form-select" onchange="this.form.submit()">
+          % for my $fname (@$log_file_names) {
+            <option value="<%= $fname %>" <%= $selected_file eq $fname ? 'selected' : '' %>>
+              <%= $fname %><%= $fname eq 'cron.log' ? ' (Current)' : '' %>
+            </option>
+          % }
+          % if (@$log_file_names > 1) {
+            <option value="ALL" <%= $selected_file eq 'ALL' ? 'selected' : '' %>>All Rotated Logs (cron.log*)</option>
+          % }
+        </select>
+      </form>
+    </div>
+
+    % if (!@$displayed_runs) {
+      <p style="color: var(--text-muted); font-style: italic; padding: 12px 0;">
+        No hourly monitor log entries found in <code>/opt/aitrader/logs/<%= $selected_file %></code>.
+      </p>
+    % } else {
+      <div class="table-responsive">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th style="width: 175px;">Run Timestamp</th>
+              <th style="width: 110px;">Event</th>
+              <th>Metric / Action</th>
+              <th style="text-align: right; width: 230px;">Price / Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            % for my $run (@$displayed_runs) {
+              % for my $m (@{$run->{metrics}}) {
+                % my $tone = $m->{tone} // 'info';
+                <tr>
+                  <td class="ts-cell">
+                    <%= $run->{timestamp} %>
+                    % if ($selected_file eq 'ALL') {
+                      <span style="font-size: 0.72rem;">(<%= $run->{file} %>)</span>
+                    % }
+                  </td>
+                  <td><span class="badge badge-<%= $tone %>"><%= $m->{badge} %></span></td>
+                  <td class="metric-cell"><%= $m->{metric} %></td>
+                  <td class="val-cell val-<%= $tone %>"><%= $m->{value} %></td>
+                </tr>
+              % }
+            % }
+          </tbody>
+        </table>
+      </div>
+
+      % if (length($raw_combined // '')) {
+        <details class="raw-log-details">
+          <summary>View Raw Log Output (<%= $selected_file eq 'ALL' ? 'cron.log*' : $selected_file %>)</summary>
+          <pre><%= $raw_combined %></pre>
+        </details>
+      % }
+    % }
+  </div>
+
+  <!-- Section 2: Database Run History -->
+  <div class="section-card">
+    <div class="section-header">
+      <div class="section-title">
+        AI Trader Monitor &amp; Evaluation Run History
+        <code>run_logs</code>
+      </div>
+    </div>
+
+    % if (!@$run_history) {
+      <p style="color: var(--text-muted); font-style: italic; padding: 12px 0;">
+        No run history recorded in database yet.
+      </p>
+    % } else {
+      <div class="table-responsive">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th style="width: 175px;">Timestamp</th>
+              <th style="width: 110px;">Trigger</th>
+              <th style="width: 140px;">Run Type</th>
+              <th>Run Summary Details</th>
+              <th style="text-align: right; width: 170px;">Portfolio NAV</th>
+            </tr>
+          </thead>
+          <tbody>
+            % for my $r (@$run_history) {
+              % my $trig = lc($r->{trigger_source} // 'cron');
+              % my $trig_tone = $trig eq 'cron' ? 'info' : ($trig eq 'web' ? 'ok' : 'muted');
+              % my $rtype = ($r->{run_type} // '') eq 'market_eval' ? 'MARKET EVAL' : 'PRICE MONITOR';
+              % my $rtone = ($r->{run_type} // '') eq 'market_eval' ? 'ok' : (($r->{alerts_count} // 0) > 0 ? 'warn' : 'info');
+              <tr>
+                <td class="ts-cell" title="<%= $r->{display} %>"><%= substr($r->{timestamp}, 0, 16) %></td>
+                <td><span class="badge badge-<%= $trig_tone %>"><%= uc($trig) %></span></td>
+                <td><span class="badge badge-<%= $rtone %>"><%= $rtype %></span></td>
+                <td class="metric-cell"><%= $r->{summary} %></td>
+                <td class="val-cell val-ok">
+                  % if (defined $r->{total_nav}) {
+                    $<%= sprintf("%.2f", $r->{total_nav}) %>
+                  % } else {
+                    <span class="val-muted">—</span>
+                  % }
+                </td>
+              </tr>
+            % }
+          </tbody>
+        </table>
+      </div>
+    % }
+  </div>
+
+  <script>
+    let currentThemeMode = 'system';
+    function getSystemTheme() {
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    function setThemeMode(mode, save = true) {
+      currentThemeMode = mode;
+      if (save) localStorage.setItem('ai_trader_theme', mode);
+      let effectiveTheme = (mode === 'system') ? getSystemTheme() : mode;
+      document.documentElement.setAttribute('data-theme', effectiveTheme);
+      const iconEl = document.getElementById('themeIcon');
+      if (iconEl) {
+        iconEl.textContent = (mode === 'system') ? '💻' : (mode === 'light' ? '☀️' : '🌙');
+      }
+      document.querySelectorAll('.theme-menu-item').forEach(item => {
+        item.classList.toggle('active', item.getAttribute('data-theme-val') === mode);
+      });
+    }
+    function selectThemeMode(mode) {
+      setThemeMode(mode, true);
+      document.getElementById('themeMenu').classList.remove('active');
+    }
+    document.getElementById('btnThemeToggle').addEventListener('click', (e) => {
+      e.stopPropagation();
+      document.getElementById('themeMenu').classList.toggle('active');
+    });
+    document.addEventListener('click', (e) => {
+      const dd = document.querySelector('.theme-dropdown');
+      if (dd && !dd.contains(e.target)) {
+        document.getElementById('themeMenu').classList.remove('active');
+      }
+    });
+    const savedTheme = localStorage.getItem('ai_trader_theme') || 'system';
+    setThemeMode(savedTheme, false);
+  </script>
 </body>
 </html>

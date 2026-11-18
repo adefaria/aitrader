@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Trader Hourly Market & Portfolio Price Monitor (Production)
+After=network-online.target
+Wants=network-online.target
+ConditionHost=!earth
+
+[Service]
+Type=oneshot
+User=andrew
+Group=defaria
+Environment=HOME=/home/andrew
+Environment=PERL5LIB=/opt/aitrader/local/lib/perl5:/opt/aitrader/src/lib
+WorkingDirectory=/opt/aitrader
+ExecStart=/usr/bin/perl -I/opt/aitrader/local/lib/perl5 -I/opt/aitrader/src/lib /opt/aitrader/src/check_prices.pl --trigger=cron

@@ -8,8 +8,9 @@ use lib "$RealBin/lib";
 use Getopt::Long qw(:config no_ignore_case);
 use Pod::Usage;
 use POSIX qw(strftime);
+use Sys::Hostname qw(hostname);
 use Mojo::UserAgent;
-use Trader::DB qw(get_dbh init_schema seed_initial_state fetch_market_price get_latest_nav get_git_commit);
+use Trader::DB qw(get_dbh init_schema seed_initial_state fetch_market_price get_latest_nav get_positions get_git_commit record_run_log);
 
 eval {
     require Dotenv;
@@ -21,19 +22,27 @@ $| = 1;
 my $dry_run = 0;
 my $propose = 0;
 my $help    = 0;
+my $trigger = (-t STDIN) ? 'cli' : 'cron';
 my $db_path = $ENV{DB_PATH} // "$RealBin/../data/paper_ledger.db";
 my $capital = $ENV{STARTING_CAPITAL} // 167876.21;
 my $benchmark = $ENV{BENCHMARK_TICKER} // 'SPY';
 my $exec_mode = $ENV{EXECUTION_MODE} // 'ADVISOR_BRIEF';
 
 GetOptions(
-    'dry-run' => \$dry_run,
-    'propose' => \$propose,
-    'db=s'    => \$db_path,
-    'help|h'  => \$help,
+    'dry-run'   => \$dry_run,
+    'propose'   => \$propose,
+    'trigger=s' => \$trigger,
+    'db=s'      => \$db_path,
+    'help|h'    => \$help,
 ) or pod2usage(2);
 
 pod2usage(1) if $help;
+
+my $current_host = lc(hostname() // '');
+if ($trigger eq 'cron' && $current_host =~ /earth/) {
+    print "[run_daily] Staging server ($current_host) detected; skipping automated cron/timer execution.\n";
+    exit 0;
+}
 
 # Enforce advisor-only recommendations mode unless explicitly overridden
 $propose = 1 if uc($exec_mode) eq 'ADVISOR_BRIEF';
@@ -120,6 +129,25 @@ system($engine_cmd) == 0 or die "[Step 5] Portfolio engine failed with code $?\n
 
 my $report_cmd = "perl -Ilocal/lib/perl5 -I$RealBin/lib $RealBin/generate_report.pl" . ($dry_run ? " --dry-run" : "");
 system($report_cmd) == 0 or die "[Step 5] Report generation failed with code $?\n";
+
+if (!$dry_run) {
+    my $end_dbh = get_dbh($db_path);
+    my $end_nav = get_latest_nav($end_dbh);
+    my $end_pos = get_positions($end_dbh);
+    my ($scored_today) = $end_dbh->selectrow_array(
+        "SELECT COUNT(*) FROM catalyst_events WHERE status = 'SCORED' AND timestamp >= date('now', 'localtime')"
+    );
+    record_run_log(
+        $end_dbh,
+        run_type         => 'market_eval',
+        trigger_source   => $trigger,
+        summary          => sprintf("Full 5-stage market evaluation complete (%d catalysts scored, %d open holdings)", $scored_today // 0, scalar(@$end_pos)),
+        holdings_checked => scalar(@$end_pos),
+        catalysts_scored => $scored_today // 0,
+        total_nav        => $end_nav ? $end_nav->{total_nav} : undef,
+    );
+    $end_dbh->disconnect;
+}
 
 print "\n========================================================\n";
 print " End-to-end daily pipeline verification SUCCESSFUL!     \n";

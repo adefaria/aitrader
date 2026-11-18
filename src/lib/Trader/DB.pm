@@ -3,7 +3,7 @@ package Trader::DB;
 use strict;
 use warnings;
 use DBI;
-use POSIX qw(strftime);
+use POSIX qw(strftime mktime);
 use Mojo::UserAgent;
 
 use Exporter 'import';
@@ -12,6 +12,7 @@ our @EXPORT_OK = qw(
     init_schema
     seed_initial_state
     fetch_market_price
+    fetch_market_quote
     fetch_market_indices
     get_latest_nav
     get_positions
@@ -24,6 +25,9 @@ our @EXPORT_OK = qw(
     upsert_position
     close_position
     get_git_commit
+    record_run_log
+    get_last_run
+    get_run_logs
 );
 
 sub get_dbh {
@@ -106,10 +110,52 @@ sub init_schema {
         )
     });
 
+    $dbh->do(qq{
+        CREATE TABLE IF NOT EXISTS price_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            asset_type TEXT NOT NULL,
+            price REAL NOT NULL,
+            previous_close REAL NOT NULL,
+            day_change REAL NOT NULL,
+            day_change_pct REAL NOT NULL,
+            hourly_change_pct REAL DEFAULT 0.0
+        )
+    });
+
+    $dbh->do(qq{
+        CREATE TABLE IF NOT EXISTS price_alert_state (
+            date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            last_price REAL NOT NULL,
+            last_alert_price REAL,
+            last_alert_pct REAL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (date, symbol)
+        )
+    });
+
+    $dbh->do(qq{
+        CREATE TABLE IF NOT EXISTS run_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            run_type TEXT NOT NULL,
+            trigger_source TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            alerts_count INTEGER DEFAULT 0,
+            holdings_checked INTEGER DEFAULT 0,
+            catalysts_scored INTEGER DEFAULT 0,
+            proposed_trades INTEGER DEFAULT 0,
+            total_nav REAL,
+            details_json TEXT
+        )
+    });
+
     return 1;
 }
 
-sub fetch_market_price {
+sub fetch_market_quote {
     my ($ticker) = @_;
     $ticker //= 'SPY';
 
@@ -118,21 +164,42 @@ sub fetch_market_price {
     $ua->inactivity_timeout(3);
     $ua->connect_timeout(2);
 
-    my $price;
+    my ($price, $prev);
     for my $host ('query1.finance.yahoo.com', 'query2.finance.yahoo.com') {
-        my $url = "https://$host/v8/finance/chart/$ticker?interval=1d&range=5d";
+        my $url = "https://$host/v8/finance/chart/$ticker?interval=1m&range=1d";
         eval {
             my $tx = $ua->get($url);
             if ($tx->result->is_success) {
                 my $json = $tx->result->json;
                 my $meta = $json->{chart}{result}[0]{meta};
                 $price = $meta->{regularMarketPrice} // $meta->{chartPreviousClose};
+                $prev  = $meta->{chartPreviousClose} // $meta->{previousClose} // $price;
             }
         };
         last if defined $price && $price > 0;
     }
 
-    return $price;
+    if (!defined $price || $price <= 0) {
+        return undef;
+    }
+
+    $prev = $price if !defined $prev || $prev <= 0;
+    my $change = $price - $prev;
+    my $pct    = ($prev > 0) ? (($change / $prev) * 100) : 0.0;
+
+    return {
+        ticker         => $ticker,
+        price          => $price,
+        previous_close => $prev,
+        change         => $change,
+        pct            => $pct,
+    };
+}
+
+sub fetch_market_price {
+    my ($ticker) = @_;
+    my $quote = fetch_market_quote($ticker);
+    return $quote ? $quote->{price} : undef;
 }
 
 sub fetch_market_indices {
@@ -350,6 +417,103 @@ sub get_git_commit {
     my $commit = `git rev-parse HEAD 2>/dev/null`;
     chomp($commit) if defined $commit;
     return $commit || 'git-unknown';
+}
+
+sub _format_display_ts {
+    my ($ts) = @_;
+    return '' unless defined $ts && length $ts;
+    if ($ts =~ /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})(?::(\d{2}))?/) {
+        my ($y, $m, $d, $H, $M, $S) = ($1, $2, $3, $4, $5, $6 // 0);
+        my $epoch = mktime($S, $M, $H, $d, $m - 1, $y - 1900);
+        if (defined $epoch) {
+            my $str = strftime("%a %b %e, %Y %l:%M %p %Z", localtime($epoch));
+            $str =~ s/\s+/ /g;
+            $str =~ s/^\s+|\s+$//g;
+            return $str;
+        }
+    }
+    return $ts;
+}
+
+sub _enrich_run_row {
+    my ($row) = @_;
+    return undef unless $row;
+    $row->{display} = _format_display_ts($row->{timestamp});
+    my $trig = lc($row->{trigger_source} // 'cron');
+    my %trig_map = (
+        cron => 'cron',
+        web  => 'on demand',
+        cli  => 'command line',
+    );
+    $row->{trigger_label} = $trig_map{$trig} // $trig;
+
+    my @parts;
+    if (($row->{run_type} // '') eq 'market_eval') {
+        push @parts, 'market eval';
+        if (defined $row->{catalysts_scored} && $row->{catalysts_scored} > 0) {
+            push @parts, "$row->{catalysts_scored} catalysts";
+        }
+        if (defined $row->{proposed_trades}) {
+            push @parts, "$row->{proposed_trades} proposed";
+        }
+    } else {
+        if (defined $row->{holdings_checked} && $row->{holdings_checked} > 0) {
+            push @parts, "$row->{holdings_checked} holdings";
+        }
+        if (defined $row->{alerts_count}) {
+            push @parts, "$row->{alerts_count} alert" . ($row->{alerts_count} == 1 ? '' : 's');
+        }
+    }
+    $row->{short_summary} = @parts ? join(', ', @parts) : ($row->{summary} // '');
+    return $row;
+}
+
+sub record_run_log {
+    my ($dbh, %args) = @_;
+    init_schema($dbh);
+    my $timestamp = $args{timestamp} // strftime("%Y-%m-%d %H:%M:%S", localtime);
+    my $sth = $dbh->prepare(qq{
+        INSERT INTO run_logs (
+            timestamp, run_type, trigger_source, summary,
+            alerts_count, holdings_checked, catalysts_scored,
+            proposed_trades, total_nav, details_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    });
+    $sth->execute(
+        $timestamp,
+        $args{run_type}         // 'price_check',
+        $args{trigger_source}   // 'cron',
+        $args{summary}          // 'Completed',
+        $args{alerts_count}     // 0,
+        $args{holdings_checked} // 0,
+        $args{catalysts_scored} // 0,
+        $args{proposed_trades}  // 0,
+        $args{total_nav},
+        $args{details_json}
+    );
+    return $dbh->sqlite_last_insert_rowid();
+}
+
+sub get_last_run {
+    my ($dbh) = @_;
+    init_schema($dbh);
+    my $sth = $dbh->prepare("SELECT * FROM run_logs ORDER BY id DESC LIMIT 1");
+    $sth->execute();
+    my $row = $sth->fetchrow_hashref();
+    return _enrich_run_row($row);
+}
+
+sub get_run_logs {
+    my ($dbh, $limit) = @_;
+    $limit //= 100;
+    init_schema($dbh);
+    my $sth = $dbh->prepare("SELECT * FROM run_logs ORDER BY id DESC LIMIT ?");
+    $sth->execute($limit);
+    my $rows = $sth->fetchall_arrayref({});
+    for my $r (@$rows) {
+        _enrich_run_row($r);
+    }
+    return $rows;
 }
 
 1;

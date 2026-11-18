@@ -1,4 +1,7 @@
 local/
 .env
 data/*.db
+data/*.db-*
 data/reports/
+logs/
+

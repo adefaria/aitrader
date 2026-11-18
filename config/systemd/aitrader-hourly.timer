@@ -1,0 +1,12 @@
+[Unit]
+Description=Run AI Trader price check hourly during US trading hours (Mon-Fri 06:35 & 07:00-13:00 PT)
+
+[Timer]
+# Shortly after 6:30 AM PT (9:30 AM ET) opening bell
+OnCalendar=Mon..Fri *-*-* 06:35:00
+# Every hour on the hour from 7:00 AM PT through 1:00 PM PT (4:00 PM ET closing bell)
+OnCalendar=Mon..Fri *-*-* 07..13:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
