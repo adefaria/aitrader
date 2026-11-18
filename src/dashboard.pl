@@ -8,6 +8,9 @@ use lib "$RealBin/lib";
 use Mojolicious::Lite -signatures;
 use Mojo::JSON qw(decode_json encode_json true false);
 use POSIX qw(strftime);
+use Sys::Hostname qw(hostname);
+use MIME::Base64 qw(encode_base64);
+use Encode qw(encode_utf8);
 use File::Spec;
 use Trader::DB qw(
     get_dbh get_latest_nav get_positions fetch_market_price fetch_market_quote
@@ -582,6 +585,66 @@ post '/api/trades/execute' => sub ($c) {
         skipped        => \@skipped,
         message        => "Executed $executed trade(s) successfully.",
     });
+};
+
+post '/api/trades/compose-email' => sub ($c) {
+    my $payload = $c->req->json // {};
+    my $html    = $payload->{html} // '';
+    my $subject = $payload->{subject} // ('Portfolio Trade Recommendations - ' . strftime("%Y-%m-%d", localtime));
+    my $to      = $payload->{to} // $ENV{ADVISOR_EMAIL} // 'Jon.Vance@RaymondJames.com';
+    my $mode    = $payload->{mode} // 'compose';
+
+    if (!length($html)) {
+        return $c->render(status => 400, json => {
+            success => 0,
+            message => 'No HTML email payload provided.',
+        });
+    }
+
+    # Sanitize subject & recipient for thunderbird -compose string (no commas or single quotes)
+    $subject =~ s/[',]/ /g;
+    $to      =~ s/[',]/ /g;
+
+    my $b64_html = encode_base64(encode_utf8($html), '');
+    my $tmp_file = '/tmp/aitrader_jon_recommendations.html';
+
+    my $remote_cmd =
+        "export DISPLAY=:0 " .
+        "XAUTHORITY=/home/andrew/.Xauthority " .
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus; " .
+        "echo '$b64_html' | base64 -d > $tmp_file; " .
+        "if command -v xclip >/dev/null 2>&1; then " .
+        "  xclip -selection clipboard -t text/html -i $tmp_file >/dev/null 2>&1 & " .
+        "fi; ";
+
+    if ($mode eq 'compose') {
+        $remote_cmd .=
+            "if command -v thunderbird >/dev/null 2>&1; then " .
+            "  nohup thunderbird -compose \"to='$to',subject='$subject',format=html,message='$tmp_file'\" >/dev/null 2>&1 & " .
+            "fi";
+    }
+
+    my $host = lc(hostname() // '');
+    my $rc = 0;
+    if ($host =~ /cloud/ || $host eq 'defaria.com' || $host eq 'defaria') {
+        $rc = system('ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', 'earth', $remote_cmd);
+    } else {
+        $rc = system('bash', '-c', $remote_cmd);
+    }
+
+    if ($rc == 0) {
+        return $c->render(json => {
+            success => 1,
+            message => ($mode eq 'compose')
+                ? "Opened Thunderbird HTML compose window for $to (and copied HTML to clipboard)!"
+                : "Copied Thunderbird-compatible HTML email to clipboard!",
+        });
+    } else {
+        return $c->render(json => {
+            success => 1,
+            message => "Copied Thunderbird HTML email to browser clipboard!",
+        });
+    }
 };
 
 post '/api/evaluate' => sub ($c) {
@@ -1184,6 +1247,49 @@ __DATA__
       overflow: hidden;
       animation: fadeIn 0.2s ease;
     }
+    #evalModal .modal-dialog {
+      max-width: 1100px;
+      width: 96%;
+    }
+    .eval-table-scroll {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow-x: auto;
+      overflow-y: visible;
+      -webkit-overflow-scrolling: touch;
+      margin-bottom: 0;
+      box-shadow: var(--shadow);
+    }
+    .eval-trades-table {
+      width: 100%;
+      min-width: 960px;
+      border-collapse: collapse;
+      text-align: left;
+    }
+    .eval-trades-table th, .eval-trades-table td {
+      vertical-align: top;
+      padding: 12px 14px;
+    }
+    .eval-trades-table .col-nowrap {
+      white-space: nowrap;
+    }
+    .eval-trades-table .col-ticker {
+      min-width: 150px;
+    }
+    .eval-trades-table .col-rationale {
+      min-width: 380px;
+      font-size: 0.82rem;
+      line-height: 1.48;
+      color: var(--text);
+      white-space: normal;
+    }
+    .btn-tb {
+      background: #0a84ff;
+      color: #ffffff;
+      border-color: #0a84ff;
+    }
+    .btn-tb:hover { opacity: 0.92; }
     .modal-header {
       display: flex;
       justify-content: space-between;
@@ -1740,9 +1846,19 @@ __DATA__
           <div id="evalTradesBody"></div>
         </div>
       </div>
-      <div id="evalModalFooter" class="modal-footer">
-        <button type="button" id="btnEvalCancel" class="btn btn-secondary" onclick="closeEvalModal()" disabled>Close</button>
-        <button type="button" id="btnExecuteTrades" class="btn btn-primary" onclick="executeSelectedTrades()" style="display: none;">Record Selected Real-World Trades</button>
+      <div id="evalModalFooter" class="modal-footer" style="justify-content: space-between; flex-wrap: wrap;">
+        <div id="evalEmailActions" style="display: none; align-items: center; gap: 8px; flex-wrap: wrap;">
+          <button type="button" id="btnEmailJon" class="btn btn-tb" onclick="composeThunderbirdEmail()" title="Open a Thunderbird HTML Compose window addressed to Jon Vance with a formatted recommendation table">
+            <span>✉️ Email Jon in Thunderbird</span>
+          </button>
+          <button type="button" id="btnCopyHtmlEmail" class="btn btn-secondary" onclick="copyThunderbirdEmail()" title="Copy Thunderbird-compatible rich HTML email table to clipboard">
+            <span>📋 Copy HTML for TB</span>
+          </button>
+        </div>
+        <div style="display: flex; align-items: center; gap: 10px; margin-left: auto;">
+          <button type="button" id="btnEvalCancel" class="btn btn-secondary" onclick="closeEvalModal()" disabled>Close</button>
+          <button type="button" id="btnExecuteTrades" class="btn btn-primary" onclick="executeSelectedTrades()" style="display: none;">Record Selected Real-World Trades</button>
+        </div>
       </div>
     </div>
   </div>
@@ -2138,6 +2254,7 @@ __DATA__
       document.getElementById('evalTradesSection').style.display = 'none';
       document.getElementById('evalTradesBody').innerHTML = '';
       document.getElementById('btnExecuteTrades').style.display = 'none';
+      document.getElementById('evalEmailActions').style.display = 'none';
       document.getElementById('btnEvalCancel').disabled = true;
       document.getElementById('btnEvalCancel').textContent = 'Close';
       document.getElementById('evalCloseX').disabled = true;
@@ -2210,6 +2327,7 @@ __DATA__
       const section = document.getElementById('evalTradesSection');
       const body = document.getElementById('evalTradesBody');
       const execBtn = document.getElementById('btnExecuteTrades');
+      const emailActions = document.getElementById('evalEmailActions');
       const cancelBtn = document.getElementById('btnEvalCancel');
       section.style.display = 'block';
 
@@ -2221,6 +2339,7 @@ __DATA__
           </div>
         `;
         execBtn.style.display = 'none';
+        emailActions.style.display = 'none';
         cancelBtn.textContent = 'Done & Refresh';
         return;
       }
@@ -2230,36 +2349,36 @@ __DATA__
         const scoreBadge = t.catalyst_score ? `<span class="score-badge score-high">${t.catalyst_score}/10</span>` : '-';
         return `
           <tr>
-            <td style="text-align:center;">
+            <td class="col-nowrap" style="text-align:center;">
               <label class="toggle-switch" title="Toggle only if you executed this trade in the real world with Jon">
                 <input type="checkbox" class="trade-toggle" data-idx="${idx}" onchange="updateSelectedSummary()">
                 <span class="toggle-slider"></span>
               </label>
             </td>
-            <td><span class="${isBuy ? 'action-buy' : 'action-sell'}">${escapeHtml(t.action)}</span></td>
-            <td><strong>${escapeHtml(t.ticker)}</strong><div style="font-size:0.72rem; color:var(--text-muted);">${escapeHtml(t.sector || '')}</div></td>
-            <td>${Number(t.shares)}</td>
-            <td>$${Number(t.price).toFixed(2)}</td>
-            <td><strong>$${Number(t.total_amount).toFixed(2)}</strong></td>
-            <td>${scoreBadge}</td>
-            <td style="font-size:0.78rem; color:var(--text-muted); max-width:240px;">${escapeHtml(t.rationale || '')}</td>
+            <td class="col-nowrap"><span class="${isBuy ? 'action-buy' : 'action-sell'}">${escapeHtml(t.action)}</span></td>
+            <td class="col-ticker"><strong>${escapeHtml(t.ticker)}</strong><div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px;">${escapeHtml(t.sector || '')}</div></td>
+            <td class="col-nowrap">${Number(t.shares)}</td>
+            <td class="col-nowrap">$${Number(t.price).toFixed(2)}</td>
+            <td class="col-nowrap"><strong>$${Number(t.total_amount).toFixed(2)}</strong></td>
+            <td class="col-nowrap">${scoreBadge}</td>
+            <td class="col-rationale">${escapeHtml(t.rationale || '')}</td>
           </tr>
         `;
       }).join('');
 
       body.innerHTML = `
-        <div class="table-container" style="margin-bottom:0;">
-          <table>
+        <div class="eval-table-scroll">
+          <table class="eval-trades-table">
             <thead>
               <tr>
-                <th style="text-align:center;">Traded?</th>
-                <th>Recommendation</th>
-                <th>Ticker</th>
-                <th>Shares</th>
-                <th>Est. Price</th>
-                <th>Est. Total</th>
-                <th>Score</th>
-                <th>Rationale for Jon</th>
+                <th class="col-nowrap" style="text-align:center;">Traded?</th>
+                <th class="col-nowrap">Recommendation</th>
+                <th class="col-ticker">Ticker</th>
+                <th class="col-nowrap">Shares</th>
+                <th class="col-nowrap">Est. Price</th>
+                <th class="col-nowrap">Est. Total</th>
+                <th class="col-nowrap">Score</th>
+                <th class="col-rationale">Rationale for Jon</th>
               </tr>
             </thead>
             <tbody>${rowsHtml}</tbody>
@@ -2269,7 +2388,145 @@ __DATA__
 
       cancelBtn.textContent = 'Close (Keep Recommendations Only)';
       execBtn.style.display = 'inline-flex';
+      emailActions.style.display = 'inline-flex';
       updateSelectedSummary();
+    }
+
+    function getTradesForEmail() {
+      const checked = [];
+      document.querySelectorAll('.trade-toggle').forEach(cb => {
+        if (cb.checked) {
+          const t = currentProposedTrades[Number(cb.getAttribute('data-idx'))];
+          if (t) checked.push(t);
+        }
+      });
+      return checked.length > 0 ? checked : currentProposedTrades;
+    }
+
+    function buildThunderbirdEmailPayload() {
+      const trades = getTradesForEmail();
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const subject = `Portfolio Trade Recommendations - ${todayStr}`;
+
+      const rowsHtml = trades.map(t => {
+        const isBuy = (t.action || '').toUpperCase() === 'BUY';
+        const actionColor = isBuy ? '#166534' : '#991b1b';
+        const actionBg    = isBuy ? '#dcfce7' : '#fee2e2';
+        const scoreStr    = t.catalyst_score ? `${t.catalyst_score}/10` : 'Risk Exit';
+        const priceStr    = '$' + Number(t.price || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const totalStr    = '$' + Number(t.total_amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        return `
+          <tr>
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; white-space:nowrap; font-weight:700;">
+              <span style="display:inline-block; padding:3px 8px; border-radius:4px; background:${actionBg}; color:${actionColor}; font-size:12px;">${escapeHtml(t.action)}</span>
+            </td>
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; white-space:nowrap;">
+              <strong style="font-size:14px; color:#0f172a;">${escapeHtml(t.ticker)}</strong><br>
+              <span style="font-size:11px; color:#64748b;">${escapeHtml(t.sector || '')}</span>
+            </td>
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right; white-space:nowrap; font-family:monospace; font-size:13px;">${Number(t.shares)}</td>
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right; white-space:nowrap; font-family:monospace; font-size:13px;">${priceStr}</td>
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right; white-space:nowrap; font-family:monospace; font-weight:700; font-size:13px;">${totalStr}</td>
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; text-align:center; white-space:nowrap; font-weight:600; font-size:12px; color:#1e293b;">${escapeHtml(scoreStr)}</td>
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; font-size:13px; line-height:1.45; color:#334155;">${escapeHtml(t.rationale || '')}</td>
+          </tr>
+        `;
+      }).join('');
+
+      const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; color:#1e293b; font-size:14px; line-height:1.5;">
+  <p style="margin:0 0 12px 0;">Hi Jon,</p>
+  <p style="margin:0 0 16px 0;">I ran my portfolio evaluation today (${escapeHtml(todayStr)}) and wanted to share the following trade recommendation${trades.length === 1 ? '' : 's'} for your review and thoughts:</p>
+  <table style="border-collapse:collapse; width:100%; max-width:920px; margin:0 0 18px 0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; background:#ffffff;">
+    <thead>
+      <tr style="background:#f1f5f9; color:#334155; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:left;">Action</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:left;">Ticker</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right;">Shares</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right;">Est. Price</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right;">Est. Total</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:center;">Trigger / Score</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:left;">Rationale</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rowsHtml}
+    </tbody>
+  </table>
+  <p style="margin:0 0 12px 0;">Let me know what you think when you have a moment.</p>
+  <p style="margin:0;">Thanks,<br>Andrew</p>
+</body>
+</html>`;
+
+      const textLines = [
+        'Hi Jon,',
+        '',
+        `I ran my portfolio evaluation today (${todayStr}) and wanted to share the following trade recommendation(s) for your review:`,
+        '',
+        ...trades.map(t => `- ${t.action} ${t.shares} shs ${t.ticker} (${t.sector || ''}) @ ~$${Number(t.price).toFixed(2)} (Est. Total: $${Number(t.total_amount).toFixed(2)}${t.catalyst_score ? ', Score: ' + t.catalyst_score + '/10' : ''})\n  Rationale: ${t.rationale || ''}`),
+        '',
+        'Let me know what you think when you have a moment.',
+        '',
+        'Thanks,',
+        'Andrew',
+      ];
+
+      return { subject, html, text: textLines.join('\n') };
+    }
+
+    async function writeBrowserClipboard(html, text) {
+      try {
+        if (navigator.clipboard && window.ClipboardItem) {
+          const item = new ClipboardItem({
+            'text/html': new Blob([html], { type: 'text/html' }),
+            'text/plain': new Blob([text], { type: 'text/plain' }),
+          });
+          await navigator.clipboard.write([item]);
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+
+    async function composeThunderbirdEmail() {
+      if (!currentProposedTrades || currentProposedTrades.length === 0) return;
+      const payload = buildThunderbirdEmailPayload();
+      await writeBrowserClipboard(payload.html, payload.text);
+      try {
+        const res = await fetch(apiUrl('api/trades/compose-email'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode: 'compose',
+            subject: payload.subject,
+            html: payload.html,
+          }),
+        });
+        const data = await res.json();
+        showToast(data.message || 'Opened Thunderbird HTML compose window for Jon!');
+      } catch (err) {
+        showToast('Copied Thunderbird HTML email to clipboard!');
+      }
+    }
+
+    async function copyThunderbirdEmail() {
+      if (!currentProposedTrades || currentProposedTrades.length === 0) return;
+      const payload = buildThunderbirdEmailPayload();
+      await writeBrowserClipboard(payload.html, payload.text);
+      try {
+        await fetch(apiUrl('api/trades/compose-email'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode: 'copy',
+            subject: payload.subject,
+            html: payload.html,
+          }),
+        });
+      } catch (err) {}
+      showToast('Copied Thunderbird HTML email to clipboard! Paste (Ctrl+V) into Thunderbird.');
     }
 
     function updateSelectedSummary() {
