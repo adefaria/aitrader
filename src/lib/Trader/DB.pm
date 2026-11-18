@@ -472,9 +472,6 @@ sub _enrich_run_row {
         if (defined $row->{catalysts_scored} && $row->{catalysts_scored} > 0) {
             push @parts, "$row->{catalysts_scored} catalysts";
         }
-        if (defined $row->{proposed_trades}) {
-            push @parts, "$row->{proposed_trades} proposed";
-        }
     } else {
         if (defined $row->{holdings_checked} && $row->{holdings_checked} > 0) {
             push @parts, "$row->{holdings_checked} holdings";

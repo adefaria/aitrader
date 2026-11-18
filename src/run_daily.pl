@@ -10,7 +10,7 @@ use Pod::Usage;
 use POSIX qw(strftime);
 use Sys::Hostname qw(hostname);
 use Mojo::UserAgent;
-use Trader::DB qw(get_dbh init_schema seed_initial_state fetch_market_price get_latest_nav get_positions get_git_commit record_run_log);
+use Trader::DB qw(get_dbh init_schema seed_initial_state fetch_market_price get_latest_nav get_positions get_proposed_trades get_git_commit record_run_log);
 
 eval {
     require Dotenv;
@@ -134,6 +134,7 @@ if (!$dry_run) {
     my $end_dbh = get_dbh($db_path);
     my $end_nav = get_latest_nav($end_dbh);
     my $end_pos = get_positions($end_dbh);
+    my $end_prop = get_proposed_trades($end_dbh);
     my ($scored_today) = $end_dbh->selectrow_array(
         "SELECT COUNT(*) FROM catalyst_events WHERE status = 'SCORED' AND timestamp >= date('now', 'localtime')"
     );
@@ -141,9 +142,10 @@ if (!$dry_run) {
         $end_dbh,
         run_type         => 'market_eval',
         trigger_source   => $trigger,
-        summary          => sprintf("Full 5-stage market evaluation complete (%d catalysts scored, %d open holdings)", $scored_today // 0, scalar(@$end_pos)),
+        summary          => sprintf("Full 5-stage market evaluation complete (%d catalysts scored, %d proposed trades, %d open holdings)", $scored_today // 0, scalar(@$end_prop), scalar(@$end_pos)),
         holdings_checked => scalar(@$end_pos),
         catalysts_scored => $scored_today // 0,
+        proposed_trades  => scalar(@$end_prop),
         total_nav        => $end_nav ? $end_nav->{total_nav} : undef,
     );
     $end_dbh->disconnect;
