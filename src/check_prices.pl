@@ -389,13 +389,14 @@ sub dispatch_notification {
     my @spoken_parts;
     for my $a (@$alert_list) {
         my $color = ($a->{day_pct} >= 0) ? '#2ea043' : '#d93025';
+        my $arrow_entity = ($a->{day_pct} >= 0) ? '&#9650;' : '&#9660;';
         my $dir_label = ($a->{day_pct} >= 0) ? 'UP' : 'DOWN';
         my $tag   = ($a->{asset_type} eq 'INDEX') ? 'Index' : 'Holding';
         my $lbl   = pango_escape($a->{label});
         my $rsn   = pango_escape($a->{trigger_reason});
         $dialog_text .= sprintf(
-            "&#8226; <b>%s</b> (%s): <b>\$%.2f</b> &#8212; <span foreground=\"%s\"><b>%s %s</b></span>\n",
-            $lbl, $tag, $a->{price}, $color, $dir_label, $rsn
+            "&#8226; <span foreground=\"%s\"><b>%s</b></span> <b>%s</b> (%s): <b>\$%.2f</b> &#8212; <span foreground=\"%s\"><b>%s %s</b></span>\n",
+            $color, $arrow_entity, $lbl, $tag, $a->{price}, $color, $dir_label, $rsn
         );
 
         if (@spoken_parts < 4) {
@@ -406,9 +407,7 @@ sub dispatch_notification {
                 $spoken_name, $dir, $pct_abs, $a->{price});
         }
     }
-
-    my $esc_url = pango_escape($dashboard_url);
-    $dialog_text .= "\nClick <b>Open AI Trader</b> below (or <a href=\"$esc_url\">open dashboard</a>) to inspect your portfolio.";
+    $dialog_text =~ s/\s+$//;
 
     my $more_spoken = ($n > 4) ? sprintf(", and %d more", $n - 4) : "";
     my $spoken_text = sprintf(

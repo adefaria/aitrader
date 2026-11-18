@@ -134,6 +134,17 @@ get '/' => sub ($c) {
         date => 'N/A'
     };
 
+    my $alert_threshold = $ENV{ALERT_THRESHOLD_PCT} // 2.0;
+    my $today = strftime("%Y-%m-%d", localtime);
+    my $alert_states = eval {
+        $dbh->selectall_hashref(
+            "SELECT symbol, last_alert_price, last_alert_pct FROM price_alert_state WHERE date = ? AND last_alert_price IS NOT NULL",
+            'symbol',
+            undef,
+            $today
+        )
+    } // {};
+
     my $positions = get_positions($dbh);
     for my $p (@$positions) {
         my $q = $c->cached_quote($p->{ticker}, $p->{cost_basis});
@@ -142,6 +153,16 @@ get '/' => sub ($c) {
         $p->{day_change_pct} = $q->{pct} // 0.0;
         $p->{return_pct}     = (($p->{current_price} - $p->{cost_basis}) / $p->{cost_basis}) * 100;
         $p->{market_val}     = $p->{shares} * $p->{current_price};
+
+        my $dpct = $p->{day_change_pct};
+        if (abs($dpct) >= $alert_threshold) {
+            $p->{alert_dir} = ($dpct >= 0) ? 'up' : 'down';
+            $p->{alert_pct} = $dpct;
+        } elsif (my $as = $alert_states->{$p->{ticker}}) {
+            my $apct = $as->{last_alert_pct} // $dpct;
+            $p->{alert_dir} = ($apct >= 0) ? 'up' : 'down';
+            $p->{alert_pct} = $apct;
+        }
     }
 
     my $trades = $dbh->selectall_arrayref(
@@ -159,6 +180,17 @@ get '/' => sub ($c) {
     $dbh->disconnect;
 
     my $indices = $c->cached_indices();
+    for my $idx (@$indices) {
+        my $ipct = $idx->{pct} // 0.0;
+        if (abs($ipct) >= $alert_threshold) {
+            $idx->{alert_dir} = ($ipct >= 0) ? 'up' : 'down';
+            $idx->{alert_pct} = $ipct;
+        } elsif (my $as = $alert_states->{$idx->{symbol}}) {
+            my $apct = $as->{last_alert_pct} // $ipct;
+            $idx->{alert_dir} = ($apct >= 0) ? 'up' : 'down';
+            $idx->{alert_pct} = $apct;
+        }
+    }
 
     $c->stash(
         nav        => $nav,
@@ -189,17 +221,97 @@ get '/api/status' => sub ($c) {
     });
 };
 
+my (%INDEX_SERIES_CACHE, $INDEX_SERIES_CACHE_TS);
+sub _fetch_index_series ($dbh) {
+    my $now = time;
+    my %sym_to_key = (
+        '^DJI'  => 'idx_dow',
+        '^GSPC' => 'idx_sp500',
+        '^IXIC' => 'idx_nasdaq',
+    );
+
+    if (!%INDEX_SERIES_CACHE || ($now - ($INDEX_SERIES_CACHE_TS // 0) > 120)) {
+        my $ua = Mojo::UserAgent->new;
+        $ua->transactor->name('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        $ua->inactivity_timeout(4);
+        $ua->connect_timeout(2);
+
+        for my $sym (keys %sym_to_key) {
+            my $key = $sym_to_key{$sym};
+            my $esc_sym = $sym;
+            $esc_sym =~ s/\^/%5E/g;
+            my @pts;
+            eval {
+                my $tx = $ua->get("https://query1.finance.yahoo.com/v8/finance/chart/$esc_sym?interval=60m&range=5d");
+                if ($tx->result->is_success) {
+                    my $res   = $tx->result->json->{chart}{result}[0] // {};
+                    my $ts    = $res->{timestamp} // [];
+                    my $close = $res->{indicators}{quote}[0]{close} // [];
+                    my $prev  = $res->{meta}{chartPreviousClose};
+                    for (my $i = 0; $i < @$ts; $i++) {
+                        my $val = $close->[$i];
+                        next unless defined $val && $val > 0;
+                        my $dt = strftime("%m/%d %H:%M", localtime($ts->[$i]));
+                        push @pts, {
+                            date           => $dt,
+                            value          => $val + 0,
+                            previous_close => ($prev ? $prev + 0 : undef),
+                        };
+                    }
+                }
+            };
+            $INDEX_SERIES_CACHE{$key} = \@pts if @pts;
+        }
+        $INDEX_SERIES_CACHE_TS = $now;
+    }
+
+    my %result;
+    for my $sym (keys %sym_to_key) {
+        my $key = $sym_to_key{$sym};
+        my @merged = @{ $INDEX_SERIES_CACHE{$key} // [] };
+        my %seen = map { $_->{date} => 1 } @merged;
+
+        my $snaps = eval {
+            $dbh->selectall_arrayref(
+                "SELECT timestamp, price, previous_close FROM price_snapshots WHERE symbol = ? ORDER BY id ASC",
+                { Slice => {} },
+                $sym
+            )
+        } // [];
+
+        for my $s (@$snaps) {
+            my $dt = $s->{timestamp} // '';
+            if ($dt =~ /^\d{4}-(\d{2})-(\d{2})\s+(\d{2}:\d{2})/) {
+                $dt = "$1/$2 $3";
+            }
+            next unless $dt && $s->{price};
+            if (!$seen{$dt}) {
+                push @merged, {
+                    date           => $dt,
+                    value          => $s->{price} + 0,
+                    previous_close => ($s->{previous_close} ? $s->{previous_close} + 0 : undef),
+                };
+                $seen{$dt} = 1;
+            }
+        }
+        $result{$key} = \@merged;
+    }
+    return \%result;
+}
+
 get '/api/history' => sub ($c) {
     my $dbh = $c->db;
     my $rows = $dbh->selectall_arrayref(
         "SELECT date, cash, positions_value, total_nav, spy_price, portfolio_return, spy_return, alpha, high_water_mark, drawdown FROM daily_nav ORDER BY date ASC",
         { Slice => {} }
     );
+    my $index_history = _fetch_index_series($dbh);
     $dbh->disconnect;
 
     $c->render(json => {
-        success => 1,
-        history => $rows,
+        success       => 1,
+        history       => $rows,
+        index_history => $index_history,
     });
 };
 
@@ -746,9 +858,47 @@ __DATA__
       align-items: center;
       gap: 6px;
     }
+    .index-ticker-link {
+      color: var(--text);
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 1px 5px;
+      margin-left: -5px;
+      border-radius: 4px;
+      transition: color 0.15s ease, background-color 0.15s ease;
+    }
+    .index-ticker-link:hover {
+      color: var(--accent-primary);
+      background: var(--accent-hover);
+      text-decoration: underline;
+    }
     .index-info .name .link-icon {
       font-size: 0.75rem;
-      opacity: 0.6;
+      opacity: 0.7;
+    }
+    .alert-arrow {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      font-weight: 800;
+      margin-left: 5px;
+      padding: 2px 5px;
+      border-radius: 4px;
+      line-height: 1;
+      vertical-align: middle;
+    }
+    .alert-arrow.up {
+      color: var(--success);
+      background: rgba(46, 160, 67, 0.16);
+      border: 1px solid rgba(46, 160, 67, 0.35);
+    }
+    .alert-arrow.down {
+      color: var(--danger);
+      background: rgba(248, 81, 73, 0.16);
+      border: 1px solid rgba(248, 81, 73, 0.35);
     }
     .index-info .symbol { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
     .index-metrics { text-align: right; }
@@ -1238,16 +1388,30 @@ __DATA__
 </head>
 <body>
 
-  <!-- Top Market Indices Bar with MarketWatch Links -->
+  <!-- Top Market Indices Bar with Local Charts & MarketWatch Ticker Links -->
   <div class="indices-strip">
     % for my $idx (@$indices) {
-      <a href="<%= $idx->{url} %>" target="_blank" rel="noopener noreferrer" class="index-card" title="Open <%= $idx->{name} %> on MarketWatch">
+      % my $idx_key = $idx->{symbol} eq '^DJI' ? 'idx_dow' : ($idx->{symbol} eq '^GSPC' ? 'idx_sp500' : 'idx_nasdaq');
+      <div class="index-card clickable-card" role="button" tabindex="0"
+           onclick="openMetricModal('<%= $idx_key %>')"
+           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openMetricModal('<%= $idx_key %>');}"
+           title="Click card to open <%= $idx->{name} %> price chart (click <%= $idx->{name} %> ticker for MarketWatch)">
         <div class="index-info">
           <div class="name">
-            <%= $idx->{name} %>
-            <span class="link-icon">↗</span>
+            <a href="<%= $idx->{url} %>" target="_blank" rel="noopener noreferrer"
+               class="index-ticker-link" onclick="event.stopPropagation();"
+               title="Open <%= $idx->{name} %> on MarketWatch">
+              <%= $idx->{name} %>
+              <span class="link-icon">&#x2197;</span>
+            </a>
+            % if (($idx->{alert_dir} // '') eq 'up') {
+              <span class="alert-arrow up" title="Price Alert: <%= sprintf('%+.2f%%', $idx->{alert_pct} // $idx->{pct}) %> today">&#9650;</span>
+            % } elsif (($idx->{alert_dir} // '') eq 'down') {
+              <span class="alert-arrow down" title="Price Alert: <%= sprintf('%+.2f%%', $idx->{alert_pct} // $idx->{pct}) %> today">&#9660;</span>
+            % }
+            <span class="card-chart-hint">📈 Chart</span>
           </div>
-          <div class="symbol"><%= $idx->{symbol} %> &bull; MarketWatch</div>
+          <div class="symbol"><%= $idx->{symbol} %> &bull; Click card for chart</div>
         </div>
         <div class="index-metrics">
           <div class="index-price"><%= sprintf("%.2f", $idx->{price}) %></div>
@@ -1255,7 +1419,7 @@ __DATA__
             <%= sprintf("%+.2f (%+.2f%%)", $idx->{change}, $idx->{pct}) %>
           </div>
         </div>
-      </a>
+      </div>
     % }
   </div>
 
@@ -1386,6 +1550,11 @@ __DATA__
                 <a href="https://www.marketwatch.com/investing/stock/<%= lc($p->{ticker}) %>" target="_blank" rel="noopener noreferrer" class="catalyst-link" title="Open <%= $p->{ticker} %> on MarketWatch">
                   <strong><%= $p->{ticker} %></strong><span class="external-icon">&#x2197;</span>
                 </a>
+                % if (($p->{alert_dir} // '') eq 'up') {
+                  <span class="alert-arrow up" title="Price Alert: <%= sprintf('%+.2f%%', $p->{alert_pct} // $p->{day_change_pct}) %> today (&ge; 2.0% threshold)">&#9650;</span>
+                % } elsif (($p->{alert_dir} // '') eq 'down') {
+                  <span class="alert-arrow down" title="Price Alert: <%= sprintf('%+.2f%%', $p->{alert_pct} // $p->{day_change_pct}) %> today (&ge; 2.0% threshold)">&#9660;</span>
+                % }
               </td>
               <td><%= $p->{shares} %></td>
               <td>$<%= sprintf("%.2f", $p->{cost_basis}) %></td>
@@ -1521,6 +1690,9 @@ __DATA__
       </div>
       <div class="modal-body">
         <div class="metric-tabs">
+          <button type="button" class="metric-tab" data-metric="idx_dow" onclick="switchMetricTab('idx_dow')">DOW (^DJI)</button>
+          <button type="button" class="metric-tab" data-metric="idx_sp500" onclick="switchMetricTab('idx_sp500')">S&amp;P 500 (^GSPC)</button>
+          <button type="button" class="metric-tab" data-metric="idx_nasdaq" onclick="switchMetricTab('idx_nasdaq')">NASDAQ (^IXIC)</button>
           <button type="button" class="metric-tab" data-metric="total_nav" onclick="switchMetricTab('total_nav')">Total Portfolio NAV</button>
           <button type="button" class="metric-tab" data-metric="cash" onclick="switchMetricTab('cash')">Cash Reserve Floor</button>
           <button type="button" class="metric-tab" data-metric="spy_price" onclick="switchMetricTab('spy_price')">SPY Price</button>
@@ -1678,9 +1850,33 @@ __DATA__
     }
 
     // =========================================================================
-    // Metric History Graph Modal
+    // Metric & Index History Graph Modal
     // =========================================================================
     const METRIC_META = {
+      idx_dow: {
+        title: 'DOW (^DJI) Hourly Price History',
+        seriesKey: 'idx_dow',
+        extract: r => Number(r.value || 0),
+        format: v => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        baseline: null,
+        color: '#388bfd',
+      },
+      idx_sp500: {
+        title: 'S&P 500 (^GSPC) Hourly Price History',
+        seriesKey: 'idx_sp500',
+        extract: r => Number(r.value || 0),
+        format: v => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        baseline: null,
+        color: '#3fb950',
+      },
+      idx_nasdaq: {
+        title: 'NASDAQ (^IXIC) Hourly Price History',
+        seriesKey: 'idx_nasdaq',
+        extract: r => Number(r.value || 0),
+        format: v => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        baseline: null,
+        color: '#a371f7',
+      },
       total_nav: {
         title: 'Total Portfolio NAV Over Time',
         extract: r => Number(r.total_nav || 0),
@@ -1714,7 +1910,16 @@ __DATA__
     };
 
     let cachedHistory = null;
+    let cachedIndexHistory = null;
     let activeMetricKey = 'total_nav';
+
+    function getSeriesForKey(metricKey) {
+      const meta = METRIC_META[metricKey];
+      if (meta && meta.seriesKey) {
+        return (cachedIndexHistory && cachedIndexHistory[meta.seriesKey]) ? cachedIndexHistory[meta.seriesKey] : [];
+      }
+      return cachedHistory || [];
+    }
 
     async function openMetricModal(metricKey) {
       activeMetricKey = metricKey;
@@ -1728,7 +1933,8 @@ __DATA__
         const res = await fetch(apiUrl('api/history'));
         const data = await res.json();
         cachedHistory = (data && data.history) ? data.history : [];
-        renderMetricChart(cachedHistory, activeMetricKey);
+        cachedIndexHistory = (data && data.index_history) ? data.index_history : {};
+        renderMetricChart(getSeriesForKey(activeMetricKey), activeMetricKey);
       } catch (err) {
         document.getElementById('metricChartContainer').innerHTML =
           '<div style="text-align:center; padding:48px; color:var(--danger);">Failed to load historical metrics.</div>';
@@ -1738,8 +1944,8 @@ __DATA__
     function switchMetricTab(metricKey) {
       activeMetricKey = metricKey;
       updateMetricTabs();
-      if (cachedHistory) {
-        renderMetricChart(cachedHistory, activeMetricKey);
+      if (cachedHistory || cachedIndexHistory) {
+        renderMetricChart(getSeriesForKey(activeMetricKey), activeMetricKey);
       }
     }
 
