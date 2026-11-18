@@ -16,6 +16,7 @@ use Trader::DB qw(
     get_dbh get_latest_nav get_positions fetch_market_price fetch_market_quote
     fetch_market_indices get_git_commit record_trade record_nav
     upsert_position close_position get_last_run get_run_logs
+    save_proposed_trades get_proposed_trades clear_proposed_trades delete_proposed_trade
 );
 
 eval {
@@ -179,6 +180,7 @@ get '/' => sub ($c) {
     );
 
     my $last_run = get_last_run($dbh);
+    my $proposed_trades = get_proposed_trades($dbh);
 
     $dbh->disconnect;
 
@@ -196,13 +198,14 @@ get '/' => sub ($c) {
     }
 
     $c->stash(
-        nav        => $nav,
-        positions  => $positions,
-        trades     => $trades,
-        catalysts  => $catalysts,
-        indices    => $indices,
-        last_run   => $last_run,
-        git_commit => get_git_commit(),
+        nav             => $nav,
+        positions       => $positions,
+        trades          => $trades,
+        catalysts       => $catalysts,
+        indices         => $indices,
+        last_run        => $last_run,
+        proposed_trades => $proposed_trades,
+        git_commit      => get_git_commit(),
     );
     $c->render(template => 'index');
 };
@@ -212,15 +215,17 @@ get '/api/status' => sub ($c) {
     my $nav = get_latest_nav($dbh);
     my $positions = get_positions($dbh);
     my $last_run = get_last_run($dbh);
+    my $proposed_trades = get_proposed_trades($dbh);
     $dbh->disconnect;
     my $indices = $c->cached_indices();
 
     $c->render(json => {
-        nav        => $nav,
-        positions  => $positions,
-        indices    => $indices,
-        last_run   => $last_run,
-        git_commit => get_git_commit(),
+        nav             => $nav,
+        positions       => $positions,
+        indices         => $indices,
+        last_run        => $last_run,
+        proposed_trades => $proposed_trades,
+        git_commit      => get_git_commit(),
     });
 };
 
@@ -506,6 +511,7 @@ post '/api/trades/execute' => sub ($c) {
                 $pos->{shares} = $rem;
             }
             $cash += $proceeds;
+            delete_proposed_trade($dbh, $ticker, 'SELL');
             $executed++;
         } elsif ($action eq 'BUY') {
             my $total_cost = $shares * $fill_price;
@@ -536,6 +542,7 @@ post '/api/trades/execute' => sub ($c) {
                 $pos_map{$ticker} = { shares => $shares, cost_basis => $fill_price, high_water_mark => $fill_price, sector => $sector };
             }
             $cash -= $total_cost;
+            delete_proposed_trade($dbh, $ticker, 'BUY');
             $executed++;
         }
     }
@@ -584,6 +591,26 @@ post '/api/trades/execute' => sub ($c) {
         executed_count => $executed,
         skipped        => \@skipped,
         message        => "Executed $executed trade(s) successfully.",
+    });
+};
+
+get '/api/trades/recommendations' => sub ($c) {
+    my $dbh = $c->db;
+    my $trades = get_proposed_trades($dbh);
+    $dbh->disconnect;
+    $c->render(json => {
+        success         => 1,
+        proposed_trades => $trades,
+    });
+};
+
+post '/api/trades/recommendations/delete' => sub ($c) {
+    my $dbh = $c->db;
+    clear_proposed_trades($dbh);
+    $dbh->disconnect;
+    $c->render(json => {
+        success => 1,
+        message => 'Trade recommendations deleted.',
     });
 };
 
@@ -1290,6 +1317,15 @@ __DATA__
       border-color: #0a84ff;
     }
     .btn-tb:hover { opacity: 0.92; }
+    .btn-danger {
+      background: rgba(248, 81, 73, 0.14);
+      color: var(--danger);
+      border-color: var(--danger);
+    }
+    .btn-danger:hover {
+      background: var(--danger);
+      color: #ffffff;
+    }
     .modal-header {
       display: flex;
       justify-content: space-between;
@@ -1544,6 +1580,9 @@ __DATA__
         % } else {
           Last run: <a href="logs.php" class="last-run-link" title="View Hourly Monitor &amp; Evaluation Logs">never</a>
         % }
+        <span id="lastRunRecsWrap" style="<%= (@$proposed_trades) ? '' : 'display:none;' %>">
+          &middot; <a href="#" class="last-run-link" onclick="openSavedRecommendationsModal(event)" title="View pending trade recommendations for review with Jon">Trade Recommendations</a>
+        </span>
       </div>
     </div>
     <div class="header-actions">
@@ -1685,9 +1724,9 @@ __DATA__
     </table>
   </div>
 
-  <!-- Scored Catalyst Pipeline -->
+  <!-- Business News -->
   <div class="section-title">
-    <span>Ingested Catalyst Scoring Pipeline</span>
+    <span>Business News</span>
     <span style="font-size: 0.8rem; font-weight: normal; color: var(--text-muted);">Evaluated via Gemini REST API &amp; 1–10 Rubric</span>
   </div>
   <div class="table-container">
@@ -1827,16 +1866,18 @@ __DATA__
         <div style="background: var(--card-inner); border: 1px solid var(--border); border-left: 3px solid var(--accent-primary); border-radius: 6px; padding: 10px 14px; margin-bottom: 14px; font-size: 0.82rem; color: var(--text-muted);">
           <strong style="color: var(--text);">Advisor-Only Mode:</strong> Evaluations never execute trades automatically. Review any recommended trades below with <strong style="color: var(--text);">Jon</strong> (your financial advisor). Only record a trade here if it has actually been executed in the real world.
         </div>
-        <div class="eval-progress-header">
-          <span id="evalStepLabel">Starting market evaluation...</span>
-          <span id="evalPercentLabel">0%</span>
-        </div>
-        <div class="progress-track">
-          <div id="evalProgressFill" class="progress-fill"></div>
-        </div>
+        <div id="evalProgressWrap">
+          <div class="eval-progress-header">
+            <span id="evalStepLabel">Starting market evaluation...</span>
+            <span id="evalPercentLabel">0%</span>
+          </div>
+          <div class="progress-track">
+            <div id="evalProgressFill" class="progress-fill"></div>
+          </div>
 
-        <button type="button" id="evalLogToggle" class="eval-log-toggle" onclick="toggleEvalLog()">Show execution log ▾</button>
-        <pre id="evalLog" class="eval-log"></pre>
+          <button type="button" id="evalLogToggle" class="eval-log-toggle" onclick="toggleEvalLog()">Show execution log ▾</button>
+          <pre id="evalLog" class="eval-log"></pre>
+        </div>
 
         <div id="evalTradesSection" style="display: none;">
           <div class="suggested-trades-header">
@@ -1848,16 +1889,14 @@ __DATA__
       </div>
       <div id="evalModalFooter" class="modal-footer" style="justify-content: space-between; flex-wrap: wrap;">
         <div id="evalEmailActions" style="display: none; align-items: center; gap: 8px; flex-wrap: wrap;">
-          <button type="button" id="btnEmailJon" class="btn btn-tb" onclick="composeThunderbirdEmail()" title="Open a Thunderbird HTML Compose window addressed to Jon Vance with a formatted recommendation table">
-            <span>✉️ Email Jon in Thunderbird</span>
-          </button>
-          <button type="button" id="btnCopyHtmlEmail" class="btn btn-secondary" onclick="copyThunderbirdEmail()" title="Copy Thunderbird-compatible rich HTML email table to clipboard">
-            <span>📋 Copy HTML for TB</span>
+          <button type="button" id="btnEmailJon" class="btn btn-tb" onclick="composeThunderbirdEmail()" title="Open a Thunderbird HTML Compose window addressed to Jon Vance with a 100%-width recommendation table">
+            <span>✉️ Email</span>
           </button>
         </div>
         <div style="display: flex; align-items: center; gap: 10px; margin-left: auto;">
-          <button type="button" id="btnEvalCancel" class="btn btn-secondary" onclick="closeEvalModal()" disabled>Close</button>
-          <button type="button" id="btnExecuteTrades" class="btn btn-primary" onclick="executeSelectedTrades()" style="display: none;">Record Selected Real-World Trades</button>
+          <button type="button" id="btnEvalCancel" class="btn btn-secondary" onclick="closeEvalModal()" disabled title="Close dialog and keep trade recommendations">Close</button>
+          <button type="button" id="btnDeleteRecs" class="btn btn-danger" onclick="deleteRecommendations()" style="display: none;" title="Delete trade recommendations and close dialog">Delete</button>
+          <button type="button" id="btnExecuteTrades" class="btn btn-primary" onclick="executeSelectedTrades()" style="display: none;" title="Record selected real-world executed trades">Record</button>
         </div>
       </div>
     </div>
@@ -2211,8 +2250,36 @@ __DATA__
     // =========================================================================
     let evalRunning = false;
     let evalPollTimer = null;
-    let currentProposedTrades = [];
+    let currentProposedTrades = <%== encode_json($proposed_trades // []) %>;
     let evalShouldReloadOnClose = false;
+
+    function updateLastRunRecsLink() {
+      const wrap = document.getElementById('lastRunRecsWrap');
+      if (!wrap) return;
+      wrap.style.display = (currentProposedTrades && currentProposedTrades.length > 0) ? '' : 'none';
+    }
+
+    async function openSavedRecommendationsModal(e) {
+      if (e) e.preventDefault();
+      if (evalRunning) return;
+      evalShouldReloadOnClose = false;
+
+      document.getElementById('evalProgressWrap').style.display = 'none';
+      document.getElementById('btnEvalCancel').disabled = false;
+      document.getElementById('evalCloseX').disabled = false;
+      document.getElementById('evalModal').classList.add('active');
+
+      try {
+        const res = await fetch(apiUrl('api/trades/recommendations'));
+        const data = await res.json();
+        if (data && Array.isArray(data.proposed_trades)) {
+          currentProposedTrades = data.proposed_trades;
+        }
+      } catch (err) {}
+
+      renderProposedTrades(currentProposedTrades);
+      updateLastRunRecsLink();
+    }
 
     function toggleEvalLog() {
       const logEl = document.getElementById('evalLog');
@@ -2245,6 +2312,7 @@ __DATA__
       btn.innerHTML = '<span>⏳ Evaluating Market...</span>';
 
       // Reset & open modal
+      document.getElementById('evalProgressWrap').style.display = 'block';
       document.getElementById('evalStepLabel').textContent = 'Starting market evaluation...';
       document.getElementById('evalPercentLabel').textContent = '5%';
       document.getElementById('evalProgressFill').style.width = '5%';
@@ -2254,6 +2322,7 @@ __DATA__
       document.getElementById('evalTradesSection').style.display = 'none';
       document.getElementById('evalTradesBody').innerHTML = '';
       document.getElementById('btnExecuteTrades').style.display = 'none';
+      document.getElementById('btnDeleteRecs').style.display = 'none';
       document.getElementById('evalEmailActions').style.display = 'none';
       document.getElementById('btnEvalCancel').disabled = true;
       document.getElementById('btnEvalCancel').textContent = 'Close';
@@ -2327,9 +2396,11 @@ __DATA__
       const section = document.getElementById('evalTradesSection');
       const body = document.getElementById('evalTradesBody');
       const execBtn = document.getElementById('btnExecuteTrades');
+      const delBtn = document.getElementById('btnDeleteRecs');
       const emailActions = document.getElementById('evalEmailActions');
       const cancelBtn = document.getElementById('btnEvalCancel');
       section.style.display = 'block';
+      updateLastRunRecsLink();
 
       if (!trades || trades.length === 0) {
         document.getElementById('evalTradesSummary').textContent = '0 trades suggested';
@@ -2339,8 +2410,9 @@ __DATA__
           </div>
         `;
         execBtn.style.display = 'none';
+        delBtn.style.display = 'none';
         emailActions.style.display = 'none';
-        cancelBtn.textContent = 'Done & Refresh';
+        cancelBtn.textContent = 'Close';
         return;
       }
 
@@ -2386,10 +2458,29 @@ __DATA__
         </div>
       `;
 
-      cancelBtn.textContent = 'Close (Keep Recommendations Only)';
+      cancelBtn.textContent = 'Close';
+      delBtn.style.display = 'inline-flex';
       execBtn.style.display = 'inline-flex';
       emailActions.style.display = 'inline-flex';
       updateSelectedSummary();
+    }
+
+    async function deleteRecommendations() {
+      const delBtn = document.getElementById('btnDeleteRecs');
+      delBtn.disabled = true;
+      try {
+        const res = await fetch(apiUrl('api/trades/recommendations/delete'), { method: 'POST' });
+        const data = await res.json();
+        currentProposedTrades = [];
+        updateLastRunRecsLink();
+        evalShouldReloadOnClose = false;
+        document.getElementById('evalModal').classList.remove('active');
+        showToast((data && data.message) || 'Trade recommendations deleted.');
+      } catch (err) {
+        showToast('Failed to delete trade recommendations.');
+      } finally {
+        delBtn.disabled = false;
+      }
     }
 
     function getTradesForEmail() {
@@ -2417,18 +2508,18 @@ __DATA__
         const totalStr    = '$' + Number(t.total_amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         return `
           <tr>
-            <td style="padding:10px 12px; border:1px solid #cbd5e1; white-space:nowrap; font-weight:700;">
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; white-space:nowrap; font-weight:700; width:1%;">
               <span style="display:inline-block; padding:3px 8px; border-radius:4px; background:${actionBg}; color:${actionColor}; font-size:12px;">${escapeHtml(t.action)}</span>
             </td>
-            <td style="padding:10px 12px; border:1px solid #cbd5e1; white-space:nowrap;">
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; white-space:nowrap; width:1%;">
               <strong style="font-size:14px; color:#0f172a;">${escapeHtml(t.ticker)}</strong><br>
               <span style="font-size:11px; color:#64748b;">${escapeHtml(t.sector || '')}</span>
             </td>
-            <td style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right; white-space:nowrap; font-family:monospace; font-size:13px;">${Number(t.shares)}</td>
-            <td style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right; white-space:nowrap; font-family:monospace; font-size:13px;">${priceStr}</td>
-            <td style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right; white-space:nowrap; font-family:monospace; font-weight:700; font-size:13px;">${totalStr}</td>
-            <td style="padding:10px 12px; border:1px solid #cbd5e1; text-align:center; white-space:nowrap; font-weight:600; font-size:12px; color:#1e293b;">${escapeHtml(scoreStr)}</td>
-            <td style="padding:10px 12px; border:1px solid #cbd5e1; font-size:13px; line-height:1.45; color:#334155;">${escapeHtml(t.rationale || '')}</td>
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right; white-space:nowrap; font-family:monospace; font-size:13px; width:1%;">${Number(t.shares)}</td>
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right; white-space:nowrap; font-family:monospace; font-size:13px; width:1%;">${priceStr}</td>
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right; white-space:nowrap; font-family:monospace; font-weight:700; font-size:13px; width:1%;">${totalStr}</td>
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; text-align:center; white-space:nowrap; font-weight:600; font-size:12px; color:#1e293b; width:1%;">${escapeHtml(scoreStr)}</td>
+            <td style="padding:10px 12px; border:1px solid #cbd5e1; font-size:13px; line-height:1.45; color:#334155; width:100%;">${escapeHtml(t.rationale || '')}</td>
           </tr>
         `;
       }).join('');
@@ -2439,16 +2530,16 @@ __DATA__
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; color:#1e293b; font-size:14px; line-height:1.5;">
   <p style="margin:0 0 12px 0;">Hi Jon,</p>
   <p style="margin:0 0 16px 0;">I ran my portfolio evaluation today (${escapeHtml(todayStr)}) and wanted to share the following trade recommendation${trades.length === 1 ? '' : 's'} for your review and thoughts:</p>
-  <table style="border-collapse:collapse; width:100%; max-width:920px; margin:0 0 18px 0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; background:#ffffff;">
+  <table width="100%" style="border-collapse:collapse; width:100%; margin:0 0 18px 0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; background:#ffffff;">
     <thead>
       <tr style="background:#f1f5f9; color:#334155; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">
-        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:left;">Action</th>
-        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:left;">Ticker</th>
-        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right;">Shares</th>
-        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right;">Est. Price</th>
-        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right;">Est. Total</th>
-        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:center;">Trigger / Score</th>
-        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:left;">Rationale</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:left; white-space:nowrap; width:1%;">Action</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:left; white-space:nowrap; width:1%;">Ticker</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right; white-space:nowrap; width:1%;">Shares</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right; white-space:nowrap; width:1%;">Est. Price</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:right; white-space:nowrap; width:1%;">Est. Total</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:center; white-space:nowrap; width:1%;">Trigger / Score</th>
+        <th style="padding:10px 12px; border:1px solid #cbd5e1; text-align:left; width:100%;">Rationale</th>
       </tr>
     </thead>
     <tbody>
@@ -2511,24 +2602,6 @@ __DATA__
       }
     }
 
-    async function copyThunderbirdEmail() {
-      if (!currentProposedTrades || currentProposedTrades.length === 0) return;
-      const payload = buildThunderbirdEmailPayload();
-      await writeBrowserClipboard(payload.html, payload.text);
-      try {
-        await fetch(apiUrl('api/trades/compose-email'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            mode: 'copy',
-            subject: payload.subject,
-            html: payload.html,
-          }),
-        });
-      } catch (err) {}
-      showToast('Copied Thunderbird HTML email to clipboard! Paste (Ctrl+V) into Thunderbird.');
-    }
-
     function updateSelectedSummary() {
       const toggles = Array.from(document.querySelectorAll('.trade-toggle'));
       let count = 0;
@@ -2544,7 +2617,7 @@ __DATA__
         `${currentProposedTrades.length} recommended (${count} marked as executed: $${totalAmt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`;
       const execBtn = document.getElementById('btnExecuteTrades');
       execBtn.disabled = count === 0;
-      execBtn.textContent = `Record Executed Trades (${count})`;
+      execBtn.textContent = count > 0 ? `Record (${count})` : 'Record';
     }
 
     async function executeSelectedTrades() {

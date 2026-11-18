@@ -12,6 +12,7 @@ use Mojo::JSON qw(encode_json);
 use Trader::DB qw(
     get_dbh get_latest_nav get_positions fetch_market_price
     record_trade record_nav get_actionable_catalysts upsert_position close_position
+    save_proposed_trades
 );
 
 eval {
@@ -313,6 +314,7 @@ if (!$dry_run) {
 }
 
 if ($propose) {
+    save_proposed_trades($dbh, \@proposed_trades) if !$dry_run;
     print "__PROPOSED_TRADES_JSON__:" . encode_json(\@proposed_trades) . "\n";
 }
 

@@ -28,6 +28,10 @@ our @EXPORT_OK = qw(
     record_run_log
     get_last_run
     get_run_logs
+    save_proposed_trades
+    get_proposed_trades
+    clear_proposed_trades
+    delete_proposed_trade
 );
 
 sub get_dbh {
@@ -149,6 +153,21 @@ sub init_schema {
             proposed_trades INTEGER DEFAULT 0,
             total_nav REAL,
             details_json TEXT
+        )
+    });
+
+    $dbh->do(qq{
+        CREATE TABLE IF NOT EXISTS proposed_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            action TEXT NOT NULL,
+            shares REAL NOT NULL,
+            price REAL NOT NULL,
+            total_amount REAL NOT NULL,
+            sector TEXT,
+            catalyst_score INTEGER,
+            rationale TEXT
         )
     });
 
@@ -514,6 +533,58 @@ sub get_run_logs {
         _enrich_run_row($r);
     }
     return $rows;
+}
+
+sub save_proposed_trades {
+    my ($dbh, $trades) = @_;
+    init_schema($dbh);
+    $dbh->do("DELETE FROM proposed_trades");
+    return 1 unless $trades && ref $trades eq 'ARRAY' && @$trades;
+
+    my $now = strftime("%Y-%m-%d %H:%M:%S", localtime);
+    my $sth = $dbh->prepare(qq{
+        INSERT INTO proposed_trades (
+            created_at, ticker, action, shares, price, total_amount,
+            sector, catalyst_score, rationale
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    });
+    for my $t (@$trades) {
+        $sth->execute(
+            $now,
+            $t->{ticker},
+            $t->{action},
+            $t->{shares},
+            $t->{price},
+            $t->{total_amount},
+            $t->{sector},
+            $t->{catalyst_score},
+            $t->{rationale}
+        );
+    }
+    return 1;
+}
+
+sub get_proposed_trades {
+    my ($dbh) = @_;
+    init_schema($dbh);
+    my $sth = $dbh->prepare("SELECT * FROM proposed_trades ORDER BY id ASC");
+    $sth->execute();
+    return $sth->fetchall_arrayref({});
+}
+
+sub clear_proposed_trades {
+    my ($dbh) = @_;
+    init_schema($dbh);
+    $dbh->do("DELETE FROM proposed_trades");
+    return 1;
+}
+
+sub delete_proposed_trade {
+    my ($dbh, $ticker, $action) = @_;
+    init_schema($dbh);
+    my $sth = $dbh->prepare("DELETE FROM proposed_trades WHERE ticker = ? AND action = ?");
+    $sth->execute(uc($ticker // ''), uc($action // ''));
+    return 1;
 }
 
 1;
