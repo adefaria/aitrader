@@ -1059,6 +1059,31 @@ __DATA__
     }
     .btn-evaluate:hover { opacity: 0.9; }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-market-status {
+      background: var(--card-inner);
+      color: var(--text-muted);
+      border-color: var(--border);
+      cursor: default;
+      user-select: none;
+    }
+    .btn-market-status .market-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+    .btn-market-status.is-open {
+      background: rgba(63, 185, 80, 0.14);
+      color: var(--success);
+      border-color: rgba(63, 185, 80, 0.4);
+    }
+    .btn-market-status.is-closed {
+      background: rgba(248, 81, 73, 0.12);
+      color: var(--danger);
+      border-color: rgba(248, 81, 73, 0.35);
+    }
 
     /* Icon-only Theme Dropdown Menu (matching jobhunt / defaria apps) */
     .theme-dropdown {
@@ -1587,6 +1612,10 @@ __DATA__
       </div>
     </div>
     <div class="header-actions">
+      <button id="btnMarketStatus" type="button" class="btn btn-market-status" title="US Stock Market (NYSE/NASDAQ): 9:30 AM – 4:00 PM ET, Mon–Fri" onclick="updateMarketStatus()">
+        <span class="market-dot"></span>
+        <span id="marketStatusText">Market Closed</span>
+      </button>
       <button id="btnEvaluate" class="btn btn-evaluate" onclick="evaluateMarket()">
         <span>⚡ Evaluate the Market</span>
       </button>
@@ -2669,9 +2698,121 @@ __DATA__
       }
     });
 
-    // Initial theme load
+    // Market Open / Closed Status (NYSE/NASDAQ Regular Hours: 9:30 AM - 4:00 PM ET, Mon-Fri)
+    function getEasterSunday(year) {
+      const a = year % 19;
+      const b = Math.floor(year / 100);
+      const c = year % 100;
+      const d = Math.floor(b / 4);
+      const e = b % 4;
+      const f = Math.floor((b + 8) / 25);
+      const g = Math.floor((b - f + 1) / 3);
+      const h = (19 * a + b - d - g + 15) % 30;
+      const i = Math.floor(c / 4);
+      const k = c % 4;
+      const l = (32 + 2 * e + 2 * i - h - k) % 7;
+      const m = Math.floor((a + 11 * h + 22 * l) / 451);
+      const month = Math.floor((h + l - 7 * m + 114) / 31);
+      const day = ((h + l - 7 * m + 114) % 31) + 1;
+      return new Date(Date.UTC(year, month - 1, day));
+    }
+
+    function isObservedFixedHoliday(year, month, day, targetMonth, targetDay) {
+      const dt = new Date(Date.UTC(year, targetMonth - 1, targetDay));
+      const dow = dt.getUTCDay();
+      let obsMonth = targetMonth;
+      let obsDay = targetDay;
+      if (dow === 6) {
+        const fri = new Date(Date.UTC(year, targetMonth - 1, targetDay - 1));
+        obsMonth = fri.getUTCMonth() + 1;
+        obsDay = fri.getUTCDate();
+      } else if (dow === 0) {
+        const mon = new Date(Date.UTC(year, targetMonth - 1, targetDay + 1));
+        obsMonth = mon.getUTCMonth() + 1;
+        obsDay = mon.getUTCDate();
+      }
+      return month === obsMonth && day === obsDay;
+    }
+
+    function nthWeekdayOfMonth(year, month, targetDow, n) {
+      const firstDow = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
+      return 1 + ((targetDow - firstDow + 7) % 7) + (n - 1) * 7;
+    }
+
+    function lastWeekdayOfMonth(year, month, targetDow) {
+      const lastDate = new Date(Date.UTC(year, month, 0));
+      const lastDow = lastDate.getUTCDay();
+      return lastDate.getUTCDate() - ((lastDow - targetDow + 7) % 7);
+    }
+
+    function isUsMarketHoliday(year, month, day) {
+      if (isObservedFixedHoliday(year, month, day, 1, 1)) return true;   // New Year's Day
+      if (month === 1 && day === nthWeekdayOfMonth(year, 1, 1, 3)) return true;  // MLK Day
+      if (month === 2 && day === nthWeekdayOfMonth(year, 2, 1, 3)) return true;  // Presidents' Day
+      const easter = getEasterSunday(year);
+      const goodFriday = new Date(easter.getTime() - 2 * 86400000);
+      if (month === (goodFriday.getUTCMonth() + 1) && day === goodFriday.getUTCDate()) return true; // Good Friday
+      if (month === 5 && day === lastWeekdayOfMonth(year, 5, 1)) return true;    // Memorial Day
+      if (isObservedFixedHoliday(year, month, day, 6, 19)) return true;  // Juneteenth
+      if (isObservedFixedHoliday(year, month, day, 7, 4)) return true;   // Independence Day
+      if (month === 9 && day === nthWeekdayOfMonth(year, 9, 1, 1)) return true;  // Labor Day
+      if (month === 11 && day === nthWeekdayOfMonth(year, 11, 4, 4)) return true; // Thanksgiving
+      if (isObservedFixedHoliday(year, month, day, 12, 25)) return true; // Christmas
+      return false;
+    }
+
+    function getMarketStatusET() {
+      const now = new Date();
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        weekday: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      }).formatToParts(now);
+
+      const map = {};
+      for (const p of parts) {
+        map[p.type] = p.value;
+      }
+
+      const year = parseInt(map.year, 10);
+      const month = parseInt(map.month, 10);
+      const day = parseInt(map.day, 10);
+      const hour = parseInt(map.hour, 10) % 24;
+      const minute = parseInt(map.minute, 10);
+      const weekday = map.weekday;
+
+      const isWeekday = !['Sat', 'Sun'].includes(weekday);
+      const isHoliday = isUsMarketHoliday(year, month, day);
+      const mins = hour * 60 + minute;
+      const isOpen = isWeekday && !isHoliday && mins >= 570 && mins < 960;
+
+      const timeStr = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} ET`;
+      return { isOpen, weekday, timeStr, isHoliday };
+    }
+
+    function updateMarketStatus() {
+      const btn = document.getElementById('btnMarketStatus');
+      const textEl = document.getElementById('marketStatusText');
+      if (!btn || !textEl) return;
+
+      const status = getMarketStatusET();
+      btn.classList.toggle('is-open', status.isOpen);
+      btn.classList.toggle('is-closed', !status.isOpen);
+      textEl.textContent = status.isOpen ? 'Market Open' : 'Market Closed';
+      const reason = status.isHoliday ? 'Market Holiday' : 'Regular hours: 9:30 AM – 4:00 PM ET, Mon–Fri';
+      btn.title = `${status.isOpen ? 'Market Open' : 'Market Closed'} (${status.weekday} ${status.timeStr}) • ${reason}`;
+    }
+
+    // Initial theme & market status load
     const savedTheme = localStorage.getItem('ai_trader_theme') || 'system';
     setThemeMode(savedTheme, false);
+    updateMarketStatus();
+    setInterval(updateMarketStatus, 30000);
   </script>
 
 </body>
